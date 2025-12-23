@@ -4,22 +4,22 @@ import requests
 
 app = Flask(__name__)
 
-# ======================
+# =========================
 # CONFIGURATION STO
-# ======================
+# =========================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 sto_state = {
     "mode": "OBSERVATION",
-    "market_status": "INCONNU",
+    "market_status": "INIT",
     "last_action": "ATTENTE",
-    "reason": "STO démarre",
+    "reason": "STO démarrage",
     "start_time": time.time()
 }
 
-# ======================
-# PAGE D'ACCUEIL
-# ======================
+# =========================
+# PAGE RACINE
+# =========================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -28,73 +28,82 @@ def home():
         "temps_en_ligne_secondes": int(time.time() - sto_state["start_time"])
     })
 
-# ======================
-# STATUT DU MARCHÉ (BINANCE)
-# ======================
-import requests
-
+# =========================
+# DONNÉES MARCHÉ BTC
+# =========================
 @app.route("/market/status", methods=["GET"])
 def market_status():
+    price = None
+    source = None
+
+    # ---- Tentative 1 : Binance ----
     try:
-        # 1️⃣ PRIX ACTUEL (endpoint SIMPLE et fiable)
-        price_url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-        price_resp = requests.get(price_url, timeout=5)
-        price_data = price_resp.json()
-        last_price = float(price_data["price"])
+        r = requests.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": "BTCUSDT"},
+            timeout=5
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict) and "price" in data:
+                price = float(data["price"])
+                source = "BINANCE"
+    except Exception:
+        pass
 
-        # 2️⃣ TENDANCE (bougies 1h – 20 dernières)
-        kline_url = "https://api.binance.com/api/v3/klines"
-        params = {
-            "symbol": "BTCUSDT",
-            "interval": "1h",
-            "limit": 20
-        }
-        kline_resp = requests.get(kline_url, params=params, timeout=5)
-        klines = kline_resp.json()
+    # ---- Tentative 2 : CoinGecko (secours) ----
+    if price is None:
+        try:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "bitcoin",
+                    "vs_currencies": "usd",
+                    "include_24hr_change": "true"
+                },
+                timeout=5
+            )
+            data = r.json()
+            if "bitcoin" in data and "usd" in data["bitcoin"]:
+                price = float(data["bitcoin"]["usd"])
+                source = "COINGECKO"
+        except Exception:
+            pass
 
-        # Extraction des prix de clôture
-        closes = [float(k[4]) for k in klines]
+    # ---- Échec total ----
+    if price is None:
+        sto_state["market_status"] = "ERREUR"
+        sto_state["last_action"] = "ATTENTE"
+        sto_state["reason"] = "Aucune source marché disponible"
 
-        # Calcul tendance simple
-        moyenne_debut = sum(closes[:10]) / 10
-        moyenne_fin = sum(closes[-10:]) / 10
-
-        if moyenne_fin > moyenne_debut:
-            tendance = "HAUSSIÈRE"
-            action = "OBSERVATION"
-            raison = "Tendance haussière détectée"
-        elif moyenne_fin < moyenne_debut:
-            tendance = "BAISSIÈRE"
-            action = "ATTENTE"
-            raison = "Tendance baissière détectée"
-        else:
-            tendance = "LATÉRALE"
-            action = "ATTENTE"
-            raison = "Marché sans direction claire"
-
-        # Mise à jour état STO
-        sto_state["market_status"] = tendance
-        sto_state["last_action"] = action
-        sto_state["reason"] = raison
-
-        return jsonify({
-            "statut_marche": tendance,
-            "prix_actuel": round(last_price, 2),
-            "action_STO": action,
-            "raison": raison
-        })
-
-    except Exception as e:
         return jsonify({
             "statut_marche": "ERREUR",
             "prix_actuel": 0,
             "action_STO": "ATTENTE",
-            "raison": str(e)
+            "raison": "Impossible de récupérer le prix BTC"
         }), 500
 
-# ======================
-# ACTION DU ROBOT
-# ======================
+    # ---- Tendance simple ----
+    tendance = "STABLE"
+    if price > 0:
+        tendance = "OK"
+
+    sto_state["market_status"] = "OK"
+    sto_state["last_action"] = "OBSERVATION"
+    sto_state["reason"] = f"Prix BTC depuis {source}"
+
+    return jsonify({
+        "statut_marche": "OK",
+        "prix_actuel": round(price, 2),
+        "tendance": tendance,
+        "source": source,
+        "action_STO": "OBSERVATION",
+        "raison": f"Connexion marché fonctionnelle ({source})"
+    })
+
+# =========================
+# ACTION STO
+# =========================
 @app.route("/bot/action", methods=["GET"])
 def bot_action():
     return jsonify({
@@ -103,21 +112,19 @@ def bot_action():
         "mode": sto_state["mode"]
     })
 
-# ======================
-# AUTHENTIFICATION (BASE)
-# ======================
+# =========================
+# AUTH ADMIN
+# =========================
 @app.route("/auth/verify_qr", methods=["POST"])
 def verify_qr():
     data = request.json or {}
     email = data.get("email")
-
     if email == ADMIN_EMAIL:
         return jsonify({"acces": "admin"})
-
     return jsonify({"acces": "utilisateur"})
 
-# ======================
+# =========================
 # LANCEMENT
-# ======================
+# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
