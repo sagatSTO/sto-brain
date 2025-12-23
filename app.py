@@ -3,7 +3,8 @@ import time
 
 app = Flask(__name__)
 
-ADMIN_EMAIL = ADMIN_EMAIL = "saguiorelio32@gmail.com"
+ADMIN_EMAIL = ADMIN_EMAIL =
+"saguiorelio32@gmail.com"
 
 sto_state = {
     "mode": "OBSERVATION",
