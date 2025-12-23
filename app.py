@@ -1,9 +1,12 @@
 from flask import Flask, request, jsonify
 import time
+import requests
 
 app = Flask(__name__)
 
-# EMAIL ADMIN STO
+# ======================
+# CONFIGURATION STO
+# ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 sto_state = {
@@ -14,6 +17,9 @@ sto_state = {
     "start_time": time.time()
 }
 
+# ======================
+# PAGE D'ACCUEIL
+# ======================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
@@ -22,28 +28,42 @@ def home():
         "temps_en_ligne_secondes": int(time.time() - sto_state["start_time"])
     })
 
-import requests
+# ======================
+# STATUT DU MARCHÉ (BINANCE)
+# ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-        r = requests.get(url, timeout=5)
+        url = "https://api.binance.com/api/v3/ticker/price"
+        params = {"symbol": "BTCUSDT"}
+
+        r = requests.get(url, params=params, timeout=5)
+        r.raise_for_status()
         data = r.json()
 
-        last_price = float(data.get("price", 0.0))
+        # Sécurisation maximale
+        price_str = data.get("price")
+        if price_str is None:
+            raise ValueError("Prix BTC indisponible")
+
+        last_price = float(price_str)
 
         sto_state["market_status"] = "OK"
         sto_state["last_action"] = "OBSERVATION"
-        sto_state["reason"] = "Connexion Binance fonctionnelle"
+        sto_state["reason"] = "Prix BTC récupéré avec succès"
 
         return jsonify({
             "statut_marche": "OK",
             "prix_actuel": last_price,
-            "action_STO": "OBSERVATION",
-            "raison": "Connexion Binance fonctionnelle"
+            "action_STO": sto_state["last_action"],
+            "raison": sto_state["reason"]
         })
 
     except Exception as e:
+        sto_state["market_status"] = "ERREUR"
+        sto_state["last_action"] = "ATTENTE"
+        sto_state["reason"] = "Erreur récupération Binance"
+
         return jsonify({
             "statut_marche": "ERREUR",
             "prix_actuel": 0.0,
@@ -51,6 +71,9 @@ def market_status():
             "raison": str(e)
         }), 500
 
+# ======================
+# ACTION DU ROBOT
+# ======================
 @app.route("/bot/action", methods=["GET"])
 def bot_action():
     return jsonify({
@@ -59,13 +82,21 @@ def bot_action():
         "mode": sto_state["mode"]
     })
 
+# ======================
+# AUTHENTIFICATION (BASE)
+# ======================
 @app.route("/auth/verify_qr", methods=["POST"])
 def verify_qr():
     data = request.json or {}
     email = data.get("email")
+
     if email == ADMIN_EMAIL:
         return jsonify({"acces": "admin"})
+
     return jsonify({"acces": "utilisateur"})
 
+# ======================
+# LANCEMENT
+# ======================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
