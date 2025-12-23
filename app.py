@@ -36,41 +36,50 @@ import requests
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        # 1️⃣ Prix actuel
+        # 1️⃣ PRIX ACTUEL (endpoint SIMPLE et fiable)
         price_url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
         price_resp = requests.get(price_url, timeout=5)
         price_data = price_resp.json()
         last_price = float(price_data["price"])
 
-        # 2️⃣ Variation 24h
-        stats_url = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
-        stats_resp = requests.get(stats_url, timeout=5)
-        stats_data = stats_resp.json()
-        variation_24h = float(stats_data["priceChangePercent"])
+        # 2️⃣ TENDANCE (bougies 1h – 20 dernières)
+        kline_url = "https://api.binance.com/api/v3/klines"
+        params = {
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "limit": 20
+        }
+        kline_resp = requests.get(kline_url, params=params, timeout=5)
+        klines = kline_resp.json()
 
-        # 3️⃣ Détermination de la tendance
-        if variation_24h > 1:
+        # Extraction des prix de clôture
+        closes = [float(k[4]) for k in klines]
+
+        # Calcul tendance simple
+        moyenne_debut = sum(closes[:10]) / 10
+        moyenne_fin = sum(closes[-10:]) / 10
+
+        if moyenne_fin > moyenne_debut:
             tendance = "HAUSSIÈRE"
-            action = "SURVEILLANCE_ACTIVE"
-            raison = "Tendance haussière sur 24h"
-        elif variation_24h < -1:
+            action = "OBSERVATION"
+            raison = "Tendance haussière détectée"
+        elif moyenne_fin < moyenne_debut:
             tendance = "BAISSIÈRE"
             action = "ATTENTE"
-            raison = "Tendance baissière sur 24h"
+            raison = "Tendance baissière détectée"
         else:
             tendance = "LATÉRALE"
-            action = "OBSERVATION"
-            raison = "Marché stable"
+            action = "ATTENTE"
+            raison = "Marché sans direction claire"
 
-        # 4️⃣ Mise à jour état STO
+        # Mise à jour état STO
         sto_state["market_status"] = tendance
         sto_state["last_action"] = action
         sto_state["reason"] = raison
 
         return jsonify({
             "statut_marche": tendance,
-            "prix_actuel": last_price,
-            "variation_24h_pourcent": variation_24h,
+            "prix_actuel": round(last_price, 2),
             "action_STO": action,
             "raison": raison
         })
