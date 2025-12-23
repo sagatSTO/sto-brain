@@ -34,21 +34,44 @@ def home():
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
         r = requests.get(url, timeout=5)
         data = r.json()
 
-        last_price = float(data["bitcoin"]["usd"])
+        prix_actuel = float(data["price"])
 
-        sto_state["market_status"] = "OK"
-        sto_state["last_action"] = "OBSERVATION"
-        sto_state["reason"] = "Prix BTC récupéré (CoinGecko)"
+        # Récupération du dernier prix connu
+        prix_precedent = sto_state.get("last_price")
+
+        # Détermination de la tendance
+        if prix_precedent is None:
+            tendance = "INCONNUE"
+            action = "OBSERVATION"
+            raison = "Première mesure du marché"
+        elif prix_actuel > prix_precedent:
+            tendance = "HAUSSE"
+            action = "SURVEILLANCE"
+            raison = "Le prix augmente"
+        elif prix_actuel < prix_precedent:
+            tendance = "BAISSE"
+            action = "ATTENTE"
+            raison = "Le prix baisse"
+        else:
+            tendance = "NEUTRE"
+            action = "OBSERVATION"
+            raison = "Prix stable"
+
+        # Mise à jour de l'état STO
+        sto_state["last_price"] = prix_actuel
+        sto_state["market_status"] = tendance
+        sto_state["last_action"] = action
+        sto_state["reason"] = raison
 
         return jsonify({
-            "statut_marche": "OK",
-            "prix_actuel": last_price,
-            "action_STO": "OBSERVATION",
-            "raison": "Connexion marché fonctionnelle"
+            "statut_marche": tendance,
+            "prix_actuel": prix_actuel,
+            "action_STO": action,
+            "raison": raison
         })
 
     except Exception as e:
@@ -56,7 +79,7 @@ def market_status():
             "statut_marche": "ERREUR",
             "prix_actuel": 0.0,
             "action_STO": "ATTENTE",
-            "raison": f"Erreur marché: {str(e)}"
+            "raison": str(e)
         }), 500
 
 # ======================
