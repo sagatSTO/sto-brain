@@ -39,7 +39,7 @@ def bot_action():
 
 @app.route("/auth/verify_qr", methods=["POST"])
 def verify_qr():
-    data = request.json
+    data = request.json or {}
     email = data.get("email")
     if email == ADMIN_EMAIL:
         return jsonify({"acces": "admin"})
