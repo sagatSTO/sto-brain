@@ -23,7 +23,6 @@ def home():
     })
 
 import requests
-
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
@@ -31,11 +30,11 @@ def market_status():
         r = requests.get(url, timeout=5)
         data = r.json()
 
-        last_price = float(data.get("price", 0))
+        last_price = float(data.get("price", 0.0))
 
-        sto_state["market_status"] = "DONNEES_OK"
+        sto_state["market_status"] = "OK"
         sto_state["last_action"] = "OBSERVATION"
-        sto_state["reason"] = "Prix BTC récupéré avec succès"
+        sto_state["reason"] = "Connexion Binance fonctionnelle"
 
         return jsonify({
             "statut_marche": "OK",
@@ -46,8 +45,10 @@ def market_status():
 
     except Exception as e:
         return jsonify({
-            "erreur": "Connexion Binance échouée",
-            "details": str(e)
+            "statut_marche": "ERREUR",
+            "prix_actuel": 0.0,
+            "action_STO": "ATTENTE",
+            "raison": str(e)
         }), 500
 
 @app.route("/bot/action", methods=["GET"])
