@@ -27,41 +27,26 @@ import requests
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        url = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
         r = requests.get(url, timeout=5)
         data = r.json()
 
-        price_change = float(data["priceChangePercent"])
-        last_price = float(data["lastPrice"])
+        last_price = float(data.get("price", 0))
 
-        if price_change > 1:
-            market_state = "FAVORABLE"
-            action = "SURVEILLANCE_ACTIVE"
-            reason = "Hausse détectée sur 24h"
-        elif price_change < -1:
-            market_state = "RISQUE"
-            action = "ATTENTE"
-            reason = "Baisse détectée sur 24h"
-        else:
-            market_state = "NEUTRE"
-            action = "ATTENTE"
-            reason = "Marché stable"
-
-        sto_state["market_status"] = market_state
-        sto_state["last_action"] = action
-        sto_state["reason"] = reason
+        sto_state["market_status"] = "DONNEES_OK"
+        sto_state["last_action"] = "OBSERVATION"
+        sto_state["reason"] = "Prix BTC récupéré avec succès"
 
         return jsonify({
-            "statut_marche": market_state,
-            "variation_24h_pourcent": price_change,
+            "statut_marche": "OK",
             "prix_actuel": last_price,
-            "action_STO": action,
-            "raison": reason
+            "action_STO": "OBSERVATION",
+            "raison": "Connexion Binance fonctionnelle"
         })
 
     except Exception as e:
         return jsonify({
-            "erreur": "Impossible de récupérer les données marché",
+            "erreur": "Connexion Binance échouée",
             "details": str(e)
         }), 500
 
