@@ -5,15 +5,15 @@ import requests
 app = Flask(__name__)
 
 # =========================
-# CONFIGURATION STO
+# CONFIG ADMIN STO
 # =========================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 sto_state = {
     "mode": "OBSERVATION",
-    "market_status": "INIT",
+    "market_status": "INCONNU",
     "last_action": "ATTENTE",
-    "reason": "STO démarrage",
+    "reason": "STO démarre",
     "start_time": time.time()
 }
 
@@ -29,77 +29,64 @@ def home():
     })
 
 # =========================
-# DONNÉES MARCHÉ BTC
+# PRIX + TENDANCE (COINGECKO)
 # =========================
 @app.route("/market/status", methods=["GET"])
 def market_status():
-    price = None
-    source = None
-
-    # ---- Tentative 1 : Binance ----
     try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=5
+        # Prix actuel
+        price_url = (
+            "https://api.coingecko.com/api/v3/simple/price"
+            "?ids=bitcoin&vs_currencies=usd"
         )
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, dict) and "price" in data:
-                price = float(data["price"])
-                source = "BINANCE"
-    except Exception:
-        pass
+        price_resp = requests.get(price_url, timeout=10).json()
+        current_price = float(price_resp["bitcoin"]["usd"])
 
-    # ---- Tentative 2 : CoinGecko (secours) ----
-    if price is None:
-        try:
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "bitcoin",
-                    "vs_currencies": "usd",
-                    "include_24hr_change": "true"
-                },
-                timeout=5
-            )
-            data = r.json()
-            if "bitcoin" in data and "usd" in data["bitcoin"]:
-                price = float(data["bitcoin"]["usd"])
-                source = "COINGECKO"
-        except Exception:
-            pass
+        # Prix il y a 1 heure
+        history_url = (
+            "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+            "?vs_currency=usd&days=1&interval=hourly"
+        )
+        history_resp = requests.get(history_url, timeout=10).json()
+        prices = history_resp["prices"]
 
-    # ---- Échec total ----
-    if price is None:
-        sto_state["market_status"] = "ERREUR"
-        sto_state["last_action"] = "ATTENTE"
-        sto_state["reason"] = "Aucune source marché disponible"
+        price_1h_ago = float(prices[-2][1])
+
+        # Calcul tendance
+        if current_price > price_1h_ago:
+            trend = "HAUSSIÈRE"
+            action = "SURVEILLANCE"
+            reason = "Prix supérieur à il y a 1 heure"
+        elif current_price < price_1h_ago:
+            trend = "BAISSIÈRE"
+            action = "ATTENTE"
+            reason = "Prix inférieur à il y a 1 heure"
+        else:
+            trend = "NEUTRE"
+            action = "ATTENTE"
+            reason = "Prix stable"
+
+        sto_state["market_status"] = "OK"
+        sto_state["last_action"] = action
+        sto_state["reason"] = reason
 
         return jsonify({
+            "statut_marche": "OK",
+            "source": "COINGECKO",
+            "prix_actuel": round(current_price, 2),
+            "prix_1h_ago": round(price_1h_ago, 2),
+            "tendance": trend,
+            "action_STO": action,
+            "raison": reason
+        })
+
+    except Exception as e:
+        return jsonify({
             "statut_marche": "ERREUR",
-            "prix_actuel": 0,
             "action_STO": "ATTENTE",
-            "raison": "Impossible de récupérer le prix BTC"
+            "prix_actuel": 0,
+            "raison": str(e)
         }), 500
-
-    # ---- Tendance simple ----
-    tendance = "STABLE"
-    if price > 0:
-        tendance = "OK"
-
-    sto_state["market_status"] = "OK"
-    sto_state["last_action"] = "OBSERVATION"
-    sto_state["reason"] = f"Prix BTC depuis {source}"
-
-    return jsonify({
-        "statut_marche": "OK",
-        "prix_actuel": round(price, 2),
-        "tendance": tendance,
-        "source": source,
-        "action_STO": "OBSERVATION",
-        "raison": f"Connexion marché fonctionnelle ({source})"
-    })
 
 # =========================
 # ACTION STO
