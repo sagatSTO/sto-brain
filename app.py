@@ -1,91 +1,97 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 import time
-import random
+from statistics import mean
 
 app = Flask(__name__)
 
 # ======================
-# CONFIG STO
+# CONFIG ADMIN
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 # ======================
-# ÉTAT GLOBAL STO
+# CONFIG STO
+# ======================
+CAPITAL_SIMULE = 1000.0
+RISK_PERCENT = 0.02  # 2% par trade
+MODE_DECISION = "C"  # A = observation, B = conservateur, C = hybride pro
+
+# ======================
+# ÉTAT STO
 # ======================
 sto_state = {
-    "mode_decision": "C",            # A = conservateur, B = normal, C = agressif
-    "profil_risque": "AGRESSIF",     # CONSERVATEUR / NORMAL / AGRESSIF
-    "capital_simule": 1000.0,
-    "risque_par_trade": 0.02,        # 2 %
-    "position_size": 0.0,
-    "rsi": None,
-    "ema": None,
-    "tendance": "INCONNUE",
-    "action": "ATTENTE",
-    "raison": "Initialisation STO",
-    "journal": [],
-    "start_time": time.time()
+    "mode": "OFFLINE",
+    "mode_decision": MODE_DECISION,
+    "market_status": "OFFLINE",
+    "last_action": "ATTENTE",
+    "reason": "STO STABLE – MODE OFFLINE",
+    "capital": CAPITAL_SIMULE,
+    "start_time": time.time(),
+    "journal": []
 }
 
 # ======================
-# OUTILS OFFLINE
+# OUTILS INDICATEURS
 # ======================
-def simulate_rsi():
-    return round(random.uniform(20, 80), 2)
+def calculate_ema(prices, period):
+    if len(prices) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = p * k + ema * (1 - k)
+    return round(ema, 2)
 
-def simulate_ema():
-    return round(random.uniform(85000, 90000), 2)
-
-def calcul_position_size():
-    return round(
-        sto_state["capital_simule"] * sto_state["risque_par_trade"], 2
-    )
-
-def log_decision():
-    sto_state["journal"].append({
-        "timestamp": int(time.time()),
-        "mode": sto_state["mode_decision"],
-        "rsi": sto_state["rsi"],
-        "ema": sto_state["ema"],
-        "action": sto_state["action"],
-        "raison": sto_state["raison"]
-    })
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(abs(min(diff, 0)))
+    avg_gain = mean(gains[:period])
+    avg_loss = mean(losses[:period])
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
 
 # ======================
 # LOGIQUE DÉCISIONNELLE
 # ======================
-def decision_engine():
-    sto_state["rsi"] = simulate_rsi()
-    sto_state["ema"] = simulate_ema()
-    sto_state["position_size"] = calcul_position_size()
+def decide(prices):
+    rsi = calculate_rsi(prices)
+    ema_fast = calculate_ema(prices, 10)
+    ema_slow = calculate_ema(prices, 20)
 
-    rsi = sto_state["rsi"]
+    action = "ATTENTE"
+    raison = "Marché neutre"
 
-    if sto_state["mode_decision"] == "A":  # Conservateur
-        if rsi < 30:
-            sto_state["action"] = "SURVEILLANCE"
-            sto_state["raison"] = "RSI bas – prudence"
-        else:
-            sto_state["action"] = "ATTENTE"
-            sto_state["raison"] = "Aucune condition sûre"
+    if rsi is None or ema_fast is None or ema_slow is None:
+        return action, "Données insuffisantes", rsi, ema_fast, ema_slow
 
-    elif sto_state["mode_decision"] == "B":  # Normal
-        if rsi < 35:
-            sto_state["action"] = "ENTREE_POTENTIELLE"
-            sto_state["raison"] = "RSI favorable"
-        else:
-            sto_state["action"] = "ATTENTE"
-            sto_state["raison"] = "Signal insuffisant"
+    if sto_state["mode_decision"] == "A":
+        return "OBSERVATION", "Mode A – observation seule", rsi, ema_fast, ema_slow
 
-    elif sto_state["mode_decision"] == "C":  # Agressif
-        if rsi < 40:
-            sto_state["action"] = "ENTREE_SIMULEE"
-            sto_state["raison"] = "RSI opportunité agressive"
-        else:
-            sto_state["action"] = "ATTENTE"
-            sto_state["raison"] = "Marché neutre"
+    if rsi > 60 and ema_fast > ema_slow:
+        action = "ACHAT"
+        raison = "RSI élevé + EMA haussière"
+    elif rsi < 40 and ema_fast < ema_slow:
+        action = "VENTE"
+        raison = "RSI faible + EMA baissière"
 
-    log_decision()
+    return action, raison, rsi, ema_fast, ema_slow
+
+# ======================
+# GESTION DU RISQUE
+# ======================
+def position_size(capital, price):
+    risk_amount = capital * RISK_PERCENT
+    if price <= 0:
+        return 0
+    size = risk_amount / price
+    return round(size, 6)
 
 # ======================
 # ROUTES API
@@ -93,38 +99,70 @@ def decision_engine():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "statut": "STO STABLE – MODE OFFLINE",
-        "uptime_sec": int(time.time() - sto_state["start_time"]),
+        "statut": "STO EN LIGNE",
+        "mode": sto_state["mode"],
         "mode_decision": sto_state["mode_decision"],
-        "profil_risque": sto_state["profil_risque"]
+        "capital_simule": sto_state["capital"],
+        "temps_en_ligne_secondes": int(time.time() - sto_state["start_time"])
     })
 
-@app.route("/test/decision", methods=["GET"])
-def test_decision():
-    decision_engine()
+@app.route("/simulate", methods=["GET"])
+def simulate():
+    """
+    Exemple :
+    /simulate?prices=87000,87100,87250,87300,87200,87400
+    """
+    raw = request.args.get("prices", "")
+    prices = [float(x) for x in raw.split(",") if x.strip()]
+
+    if len(prices) < 20:
+        return jsonify({"erreur": "au moins 20 prix requis"}), 400
+
+    last_price = prices[-1]
+    action, raison, rsi, ema_fast, ema_slow = decide(prices)
+    size = position_size(sto_state["capital"], last_price)
+
+    entry = {
+        "timestamp": int(time.time()),
+        "prix": last_price,
+        "RSI": rsi,
+        "EMA_fast": ema_fast,
+        "EMA_slow": ema_slow,
+        "action": action,
+        "raison": raison,
+        "position_size": size
+    }
+
+    sto_state["last_action"] = action
+    sto_state["reason"] = raison
+    sto_state["journal"].append(entry)
+
     return jsonify({
-        "action_STO": sto_state["action"],
+        "statut": "STO STABLE – MODE OFFLINE",
         "mode_decision": sto_state["mode_decision"],
-        "rsi": sto_state["rsi"],
-        "ema": sto_state["ema"],
-        "position_size": sto_state["position_size"],
-        "capital_simule": sto_state["capital_simule"],
-        "raison": sto_state["raison"],
-        "statut": "TEST OK"
+        "action_STO": action,
+        "prix_actuel": last_price,
+        "RSI": rsi,
+        "EMA_fast": ema_fast,
+        "EMA_slow": ema_slow,
+        "position_size": size,
+        "raison": raison
     })
 
 @app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify(sto_state["journal"][-10:])
+    return jsonify(sto_state["journal"][-20:])
 
-@app.route("/config/mode", methods=["POST"])
-def set_mode():
+# ======================
+# AUTH
+# ======================
+@app.route("/auth/verify_qr", methods=["POST"])
+def verify_qr():
     data = request.json or {}
-    mode = data.get("mode")
-    if mode in ["A", "B", "C"]:
-        sto_state["mode_decision"] = mode
-        return jsonify({"ok": True, "mode_decision": mode})
-    return jsonify({"ok": False}), 400
+    email = data.get("email")
+    if email == ADMIN_EMAIL:
+        return jsonify({"acces": "admin"})
+    return jsonify({"acces": "utilisateur"})
 
 # ======================
 # RUN
