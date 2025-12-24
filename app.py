@@ -17,6 +17,7 @@ sto_state = {
     "market_status": "INIT",
     "last_action": "ATTENTE",
     "reason": "STO démarre",
+    "last_price": None,
     "start_time": time.time()
 }
 
@@ -32,56 +33,58 @@ def home():
     })
 
 # ======================
+# FONCTIONS MARCHÉ
+# ======================
+def get_price_binance():
+    url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+    r = requests.get(url, timeout=5)
+    data = r.json()
+    return float(data["price"])
+
+def get_price_coingecko():
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {"ids": "bitcoin", "vs_currencies": "usd"}
+    r = requests.get(url, params=params, timeout=10)
+    data = r.json()
+    return float(data["bitcoin"]["usd"])
+
+def get_price_24h_ago():
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        "symbol": "BTCUSDT",
+        "interval": "1d",
+        "limit": 2
+    }
+    r = requests.get(url, params=params, timeout=5)
+    data = r.json()
+    return float(data[0][4])  # close price J-1
+
+# ======================
 # MARCHÉ : PRIX + TENDANCE
 # ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        # --- PRIX ACTUEL ---
-        price_url = "https://api.coingecko.com/api/v3/simple/price"
-        price_params = {
-            "ids": "bitcoin",
-            "vs_currencies": "usd"
-        }
-        price_resp = requests.get(price_url, params=price_params, timeout=10)
+        source = "BINANCE"
+        try:
+            price_now = get_price_binance()
+        except:
+            source = "COINGECKO"
+            price_now = get_price_coingecko()
 
-        if price_resp.status_code != 200:
-            raise Exception("CoinGecko prix indisponible")
+        price_24h_ago = get_price_24h_ago()
 
-        price_data = price_resp.json()
-        btc_price = price_data.get("bitcoin", {}).get("usd")
+        sto_state["last_price"] = price_now
 
-        if btc_price is None:
-            raise Exception("Prix BTC absent")
-
-        # --- HISTORIQUE 24H ---
-        history_url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-        history_params = {
-            "vs_currency": "usd",
-            "days": 1
-        }
-        history_resp = requests.get(history_url, params=history_params, timeout=10)
-
-        if history_resp.status_code != 200:
-            raise Exception("Historique indisponible")
-
-        history_data = history_resp.json()
-        prices = history_data.get("prices", [])
-
-        if len(prices) < 2:
-            raise Exception("Données historiques insuffisantes")
-
-        price_24h_ago = prices[0][1]
-
-        # --- CALCUL TENDANCE ---
-        if btc_price > price_24h_ago * 1.005:
+        # --- TENDANCE ---
+        if price_now > price_24h_ago * 1.005:
             tendance = "HAUSSE"
             action = "SURVEILLANCE"
-            raison = "Prix en hausse sur 24h"
-        elif btc_price < price_24h_ago * 0.995:
+            raison = "Tendance haussière confirmée"
+        elif price_now < price_24h_ago * 0.995:
             tendance = "BAISSE"
             action = "ATTENTE"
-            raison = "Prix en baisse sur 24h"
+            raison = "Tendance baissière"
         else:
             tendance = "STABLE"
             action = "ATTENTE"
@@ -93,8 +96,8 @@ def market_status():
 
         return jsonify({
             "statut_marche": "OK",
-            "source": "COINGECKO",
-            "prix_actuel": round(btc_price, 2),
+            "source": source,
+            "prix_actuel": round(price_now, 2),
             "prix_24h_ago": round(price_24h_ago, 2),
             "tendance": tendance,
             "action_STO": action,
@@ -104,9 +107,9 @@ def market_status():
     except Exception as e:
         return jsonify({
             "statut_marche": "ERREUR",
-            "prix_actuel": 0,
+            "prix_actuel": sto_state["last_price"] or 0,
             "action_STO": "ATTENTE",
-            "raison": str(e)
+            "raison": f"Erreur marché: {str(e)}"
         }), 500
 
 # ======================
