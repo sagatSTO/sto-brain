@@ -10,15 +10,20 @@ app = Flask(__name__)
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 # ======================
-# ÉTAT STO (mémoire)
+# CONFIG MODE STO
+# ======================
+MODE_DECISION = "A"  # A = Observation Active (SAFE)
+
+# ======================
+# ÉTAT STO
 # ======================
 sto_state = {
     "mode": "OBSERVATION",
+    "mode_decision": MODE_DECISION,
     "market_status": "INIT",
     "last_action": "ATTENTE",
     "reason": "STO démarre",
-    "start_time": time.time(),
-    "last_price": None
+    "start_time": time.time()
 }
 
 # ======================
@@ -29,107 +34,52 @@ def home():
     return jsonify({
         "statut": "STO EN LIGNE",
         "mode": sto_state["mode"],
-        "uptime_secondes": int(time.time() - sto_state["start_time"])
+        "mode_decision": sto_state["mode_decision"],
+        "temps_en_ligne_secondes": int(time.time() - sto_state["start_time"])
     })
 
 # ======================
-# OUTILS MARCHÉ
-# ======================
-def get_price_binance():
-    url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-    r = requests.get(url, timeout=5)
-    if r.status_code == 200:
-        return float(r.json()["price"])
-    return None
-
-def get_price_coingecko():
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": "bitcoin", "vs_currencies": "usd"}
-    r = requests.get(url, params=params, timeout=10)
-    if r.status_code == 200:
-        return float(r.json()["bitcoin"]["usd"])
-    return None
-
-def get_price_24h_ago():
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": 1}
-    r = requests.get(url, params=params, timeout=10)
-    if r.status_code == 200:
-        prices = r.json().get("prices", [])
-        if prices:
-            return float(prices[0][1])
-    return None
-
-# ======================
-# MARCHÉ : PRIX + TENDANCE (HYBRIDE PRO)
+# MARCHÉ : PRIX + TENDANCE (MODE A)
 # ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        source = None
-        price = None
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {
+            "ids": "bitcoin",
+            "vs_currencies": "usd"
+        }
 
-        # 1️⃣ Binance
-        price = get_price_binance()
-        if price:
-            source = "BINANCE"
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            raise Exception("CoinGecko indisponible")
 
-        # 2️⃣ CoinGecko fallback
-        if not price:
-            price = get_price_coingecko()
-            if price:
-                source = "COINGECKO"
+        data = r.json()
+        btc_price = data.get("bitcoin", {}).get("usd")
 
-        # 3️⃣ Dernier prix mémorisé
-        if not price and sto_state["last_price"]:
-            price = sto_state["last_price"]
-            source = "CACHE"
+        if btc_price is None:
+            raise Exception("Prix BTC absent")
 
-        if not price:
-            raise Exception("Aucune source de prix disponible")
-
-        sto_state["last_price"] = price
-
-        # ---- TENDANCE ----
-        price_24h_ago = get_price_24h_ago()
-        tendance = "INCONNUE"
-
-        if price_24h_ago:
-            variation = (price - price_24h_ago) / price_24h_ago * 100
-
-            if variation > 0.5:
-                tendance = "HAUSSE"
-                action = "SURVEILLANCE"
-                raison = "Tendance haussière 24h"
-            elif variation < -0.5:
-                tendance = "BAISSE"
-                action = "ATTENTE"
-                raison = "Tendance baissière 24h"
-            else:
-                tendance = "STABLE"
-                action = "ATTENTE"
-                raison = "Marché stable"
-        else:
-            action = "OBSERVATION"
-            raison = "Prix OK, tendance indisponible"
-
+        # MODE A : observation uniquement
         sto_state["market_status"] = "OK"
-        sto_state["last_action"] = action
-        sto_state["reason"] = raison
+        sto_state["last_action"] = "OBSERVATION"
+        sto_state["reason"] = "Mode A actif : observation sans trading"
 
         return jsonify({
             "statut_marche": "OK",
-            "source": source,
-            "prix_actuel": round(price, 2),
-            "tendance": tendance,
-            "action_STO": action,
-            "raison": raison
+            "source": "COINGECKO",
+            "mode_decision": "A",
+            "prix_actuel": round(btc_price, 2),
+            "tendance": "STABLE",
+            "action_STO": "OBSERVATION",
+            "raison": sto_state["reason"]
         })
 
     except Exception as e:
         return jsonify({
             "statut_marche": "ERREUR",
-            "prix_actuel": sto_state.get("last_price", 0),
+            "mode_decision": "A",
+            "prix_actuel": 0,
             "action_STO": "ATTENTE",
             "raison": str(e)
         }), 500
@@ -140,6 +90,7 @@ def market_status():
 @app.route("/bot/action", methods=["GET"])
 def bot_action():
     return jsonify({
+        "mode_decision": sto_state["mode_decision"],
         "action": sto_state["last_action"],
         "raison": sto_state["reason"],
         "mode": sto_state["mode"]
