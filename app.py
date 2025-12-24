@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 import time
 import requests
-from collections import deque
 
 app = Flask(__name__)
 
@@ -11,20 +10,53 @@ app = Flask(__name__)
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 # ======================
-# MÉMOIRE STO (MODE C)
+# PARAMÈTRES STO
 # ======================
-PRICE_MEMORY = deque(maxlen=20)   # mémoire des 20 derniers prix
-LAST_API_CALL = 0
-API_COOLDOWN = 60  # secondes entre appels externes
+MODE_DECISION = "C"  # C = HYBRIDE PRO (semi-actif)
+MAX_RISK_PERCENT = 0.01  # 1 % du capital
 
+# ======================
+# ÉTAT STO
+# ======================
 sto_state = {
-    "mode": "OBSERVATION",
-    "decision_mode": "C",  # MODE HYBRIDE PRO
+    "mode": "SEMI-ACTIF",
     "market_status": "INIT",
     "last_action": "ATTENTE",
-    "reason": "Première observation",
+    "reason": "Initialisation",
     "start_time": time.time()
 }
+
+# ======================
+# OUTILS INDICATEURS
+# ======================
+def calculate_ema(prices, period):
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices[1:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+def calculate_rsi(prices, period=14):
+    gains = []
+    losses = []
+
+    for i in range(1, len(prices)):
+        delta = prices[i] - prices[i - 1]
+        if delta >= 0:
+            gains.append(delta)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(abs(delta))
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
 
 # ======================
 # PAGE PRINCIPALE
@@ -34,120 +66,71 @@ def home():
     return jsonify({
         "statut": "STO EN LIGNE",
         "mode": sto_state["mode"],
-        "mode_decision": sto_state["decision_mode"],
-        "uptime_sec": int(time.time() - sto_state["start_time"])
+        "temps_en_ligne_secondes": int(time.time() - sto_state["start_time"])
     })
 
 # ======================
-# MARCHÉ : PRIX + TENDANCE (MODE C)
+# MARCHÉ : PRIX + RSI + EMA
 # ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        import math
-
-        # ======================
-        # RÉCUPÉRATION HISTORIQUE
-        # ======================
         url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-        params = {
-            "vs_currency": "usd",
-            "days": 1
-        }
+        params = {"vs_currency": "usd", "days": 1}
         r = requests.get(url, params=params, timeout=10)
 
         if r.status_code != 200:
-            raise Exception(f"Erreur marché: {r.status_code}")
+            raise Exception("Marché indisponible")
 
         data = r.json()
-        prices = [p[1] for p in data.get("prices", [])]
+        prices = [p[1] for p in data["prices"]]
 
         if len(prices) < 30:
-            raise Exception("Données insuffisantes pour indicateurs")
+            raise Exception("Données insuffisantes")
 
-        current_price = prices[-1]
-
-        # ======================
-        # CALCUL EMA
-        # ======================
-        def ema(prices, period):
-            k = 2 / (period + 1)
-            ema_val = prices[0]
-            for price in prices[1:]:
-                ema_val = price * k + ema_val * (1 - k)
-            return ema_val
-
-        ema12 = ema(prices[-26:], 12)
-        ema26 = ema(prices[-26:], 26)
+        last_price = round(prices[-1], 2)
+        ema_9 = round(calculate_ema(prices[-50:], 9), 2)
+        ema_21 = round(calculate_ema(prices[-50:], 21), 2)
+        rsi = calculate_rsi(prices[-50:])
 
         # ======================
-        # CALCUL RSI
+        # LOGIQUE SEMI-ACTIVE
         # ======================
-        def rsi(prices, period=14):
-            gains = []
-            losses = []
+        action = "ATTENTE"
+        reason = "Conditions neutres"
+        tendance = "STABLE"
 
-            for i in range(1, period + 1):
-                diff = prices[-i] - prices[-i - 1]
-                if diff >= 0:
-                    gains.append(diff)
-                else:
-                    losses.append(abs(diff))
-
-            avg_gain = sum(gains) / period if gains else 0
-            avg_loss = sum(losses) / period if losses else 1
-
-            rs = avg_gain / avg_loss
-            return 100 - (100 / (1 + rs))
-
-        rsi_val = rsi(prices)
-
-        # ======================
-        # INTERPRÉTATION STO (MODE C)
-        # ======================
-        if rsi_val > 70 and ema12 < ema26:
-            tendance = "SURACHETÉ"
-            action = "ATTENTE"
-            raison = "RSI élevé, possible correction"
-        elif rsi_val < 30 and ema12 > ema26:
-            tendance = "SURVENDU"
-            action = "OBSERVATION"
-            raison = "RSI bas, possible opportunité"
-        elif ema12 > ema26:
-            tendance = "HAUSSE"
-            action = "OBSERVATION"
-            raison = "Tendance haussière confirmée"
-        elif ema12 < ema26:
-            tendance = "BAISSE"
-            action = "ATTENTE"
-            raison = "Tendance baissière"
-        else:
-            tendance = "NEUTRE"
-            action = "ATTENTE"
-            raison = "Marché indécis"
+        if ema_9 > ema_21 and rsi < 65:
+            action = "SURVEILLANCE_ACHAT"
+            tendance = "HAUSSIÈRE"
+            reason = "EMA haussière + RSI sain"
+        elif ema_9 < ema_21 and rsi > 35:
+            action = "SURVEILLANCE_VENTE"
+            tendance = "BAISSIÈRE"
+            reason = "EMA baissière + RSI sain"
 
         sto_state["market_status"] = "OK"
         sto_state["last_action"] = action
-        sto_state["reason"] = raison
+        sto_state["reason"] = reason
 
         return jsonify({
             "statut_marche": "OK",
             "source": "COINGECKO",
-            "mode_decision": "C",
-            "prix_actuel": round(current_price, 2),
-            "ema12": round(ema12, 2),
-            "ema26": round(ema26, 2),
-            "rsi": round(rsi_val, 2),
+            "mode_decision": MODE_DECISION,
+            "prix_actuel": last_price,
+            "ema_9": ema_9,
+            "ema_21": ema_21,
+            "rsi": rsi,
             "tendance": tendance,
             "action_STO": action,
-            "raison": raison
+            "risque_max_capital": f"{int(MAX_RISK_PERCENT*100)} %",
+            "raison": reason
         })
 
     except Exception as e:
         return jsonify({
             "statut_marche": "ERREUR",
-            "mode_decision": "C",
-            "prix_actuel": 0,
+            "mode_decision": MODE_DECISION,
             "action_STO": "ATTENTE",
             "raison": str(e)
         }), 500
@@ -160,8 +143,7 @@ def bot_action():
     return jsonify({
         "action": sto_state["last_action"],
         "raison": sto_state["reason"],
-        "mode": sto_state["mode"],
-        "mode_decision": sto_state["decision_mode"]
+        "mode": sto_state["mode"]
     })
 
 # ======================
