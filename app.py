@@ -25,7 +25,13 @@ sto_state = {
     "reason": "STO démarre",
     "start_time": time.time()
 }
-
+# ======================
+# CACHE PRIX (MODE A)
+# ======================
+last_known_price = {
+    "btc_usd": None,
+    "timestamp": None
+}
 # ======================
 # PAGE PRINCIPALE
 # ======================
@@ -76,13 +82,16 @@ def market_status():
         })
 
     except Exception as e:
-        return jsonify({
-            "statut_marche": "ERREUR",
-            "mode_decision": "A",
-            "prix_actuel": 0,
-            "action_STO": "ATTENTE",
-            "raison": str(e)
-        }), 500
+    # MODE A : PAS D'ERREUR BLOQUANTE
+    return jsonify({
+        "statut_marche": "OK",
+        "mode_decision": "A",
+        "source": "CACHE",
+        "prix_actuel": last_known_price["btc_usd"],
+        "tendance": "INCONNUE",
+        "action_STO": "OBSERVATION",
+        "raison": "Marché indisponible, mode sécurité actif"
+    }), 500
 
 # ======================
 # ACTION STO
