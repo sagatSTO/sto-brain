@@ -43,75 +43,114 @@ def home():
 # ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
-    global LAST_API_CALL
+    try:
+        import math
 
-    now = time.time()
-    prix = None
-    source = "MEMOIRE"
+        # ======================
+        # RÉCUPÉRATION HISTORIQUE
+        # ======================
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+        params = {
+            "vs_currency": "usd",
+            "days": 1
+        }
+        r = requests.get(url, params=params, timeout=10)
 
-    # ---------- APPEL API CONTRÔLÉ ----------
-    if now - LAST_API_CALL > API_COOLDOWN:
-        try:
-            r = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": "bitcoin", "vs_currencies": "usd"},
-                timeout=5
-            )
-            if r.status_code == 200:
-                data = r.json()
-                prix = float(data["bitcoin"]["usd"])
-                LAST_API_CALL = now
-                source = "COINGECKO"
-                PRICE_MEMORY.append(prix)
-        except:
-            pass
+        if r.status_code != 200:
+            raise Exception(f"Erreur marché: {r.status_code}")
 
-    # ---------- FALLBACK MÉMOIRE ----------
-    if prix is None:
-        if len(PRICE_MEMORY) > 0:
-            prix = PRICE_MEMORY[-1]
-        else:
-            return jsonify({
-                "statut_marche": "ERREUR",
-                "action_STO": "ATTENTE",
-                "mode_decision": "C",
-                "raison": "Aucune donnée marché disponible",
-                "prix_actuel": 0
-            }), 200
+        data = r.json()
+        prices = [p[1] for p in data.get("prices", [])]
 
-    # ---------- CALCUL TENDANCE LOCAL ----------
-    tendance = "INCONNUE"
-    if len(PRICE_MEMORY) >= 5:
-        moyenne_passee = sum(list(PRICE_MEMORY)[:-1]) / (len(PRICE_MEMORY) - 1)
-        if prix > moyenne_passee * 1.002:
+        if len(prices) < 30:
+            raise Exception("Données insuffisantes pour indicateurs")
+
+        current_price = prices[-1]
+
+        # ======================
+        # CALCUL EMA
+        # ======================
+        def ema(prices, period):
+            k = 2 / (period + 1)
+            ema_val = prices[0]
+            for price in prices[1:]:
+                ema_val = price * k + ema_val * (1 - k)
+            return ema_val
+
+        ema12 = ema(prices[-26:], 12)
+        ema26 = ema(prices[-26:], 26)
+
+        # ======================
+        # CALCUL RSI
+        # ======================
+        def rsi(prices, period=14):
+            gains = []
+            losses = []
+
+            for i in range(1, period + 1):
+                diff = prices[-i] - prices[-i - 1]
+                if diff >= 0:
+                    gains.append(diff)
+                else:
+                    losses.append(abs(diff))
+
+            avg_gain = sum(gains) / period if gains else 0
+            avg_loss = sum(losses) / period if losses else 1
+
+            rs = avg_gain / avg_loss
+            return 100 - (100 / (1 + rs))
+
+        rsi_val = rsi(prices)
+
+        # ======================
+        # INTERPRÉTATION STO (MODE C)
+        # ======================
+        if rsi_val > 70 and ema12 < ema26:
+            tendance = "SURACHETÉ"
+            action = "ATTENTE"
+            raison = "RSI élevé, possible correction"
+        elif rsi_val < 30 and ema12 > ema26:
+            tendance = "SURVENDU"
+            action = "OBSERVATION"
+            raison = "RSI bas, possible opportunité"
+        elif ema12 > ema26:
             tendance = "HAUSSE"
-            action = "SURVEILLANCE"
+            action = "OBSERVATION"
             raison = "Tendance haussière confirmée"
-        elif prix < moyenne_passee * 0.998:
+        elif ema12 < ema26:
             tendance = "BAISSE"
             action = "ATTENTE"
-            raison = "Pression baissière détectée"
+            raison = "Tendance baissière"
         else:
-            tendance = "STABLE"
+            tendance = "NEUTRE"
             action = "ATTENTE"
-            raison = "Marché stable"
-    else:
-        action = "ATTENTE"
-        raison = "Données insuffisantes"
+            raison = "Marché indécis"
 
-    sto_state["last_action"] = action
-    sto_state["reason"] = raison
-    sto_state["market_status"] = "OK"
+        sto_state["market_status"] = "OK"
+        sto_state["last_action"] = action
+        sto_state["reason"] = raison
 
-    return jsonify({
-        "statut_marche": "OK",
-        "source": source,
-        "prix_actuel": round(prix, 2),
-        "tendance": tendance,
-        "action_STO": action,
-        "mode_decision": "C",
-        "raison": raison
-    })
+        return jsonify({
+            "statut_marche": "OK",
+            "source": "COINGECKO",
+            "mode_decision": "C",
+            "prix_actuel": round(current_price, 2),
+            "ema12": round(ema12, 2),
+            "ema26": round(ema26, 2),
+            "rsi": round(rsi_val, 2),
+            "tendance": tendance,
+            "action_STO": action,
+            "raison": raison
+        })
+
+    except Exception as e:
+        return jsonify({
+            "statut_marche": "ERREUR",
+            "mode_decision": "C",
+            "prix_actuel": 0,
+            "action_STO": "ATTENTE",
+            "raison": str(e)
+        }), 500
 
 # ======================
 # ACTION STO
