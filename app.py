@@ -1,147 +1,130 @@
 from flask import Flask, jsonify, request
 import time
-import math
+import random
 
 app = Flask(__name__)
 
 # ======================
-# CONFIG ADMIN
+# CONFIG STO
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 # ======================
-# CONFIG STO
-# ======================
-CAPITAL_SIMULE = 1000.0  # capital de test
-RISQUE_PAR_TRADE = 0.01  # 1% par trade
-MODE_DECISION = "C"      # A = passif, B = semi, C = pro
-
-# ======================
-# ÉTAT STO
+# ÉTAT GLOBAL STO
 # ======================
 sto_state = {
-    "mode": "OFFLINE",
-    "mode_decision": MODE_DECISION,
-    "statut": "STO STABLE – MODE OFFLINE",
-    "capital": CAPITAL_SIMULE,
-    "last_action": "ATTENTE",
-    "reason": "Initialisation",
-    "start_time": time.time(),
-    "journal": []
+    "mode_decision": "C",            # A = conservateur, B = normal, C = agressif
+    "profil_risque": "AGRESSIF",     # CONSERVATEUR / NORMAL / AGRESSIF
+    "capital_simule": 1000.0,
+    "risque_par_trade": 0.02,        # 2 %
+    "position_size": 0.0,
+    "rsi": None,
+    "ema": None,
+    "tendance": "INCONNUE",
+    "action": "ATTENTE",
+    "raison": "Initialisation STO",
+    "journal": [],
+    "start_time": time.time()
 }
 
 # ======================
-# OUTILS TECHNIQUES (OFFLINE)
+# OUTILS OFFLINE
 # ======================
-def calcul_ema(prices, period):
-    if len(prices) < period:
-        return None
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = p * k + ema * (1 - k)
-    return round(ema, 2)
+def simulate_rsi():
+    return round(random.uniform(20, 80), 2)
 
-def calcul_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return None
-    gains, pertes = 0, 0
-    for i in range(1, period + 1):
-        delta = prices[i] - prices[i - 1]
-        if delta > 0:
-            gains += delta
+def simulate_ema():
+    return round(random.uniform(85000, 90000), 2)
+
+def calcul_position_size():
+    return round(
+        sto_state["capital_simule"] * sto_state["risque_par_trade"], 2
+    )
+
+def log_decision():
+    sto_state["journal"].append({
+        "timestamp": int(time.time()),
+        "mode": sto_state["mode_decision"],
+        "rsi": sto_state["rsi"],
+        "ema": sto_state["ema"],
+        "action": sto_state["action"],
+        "raison": sto_state["raison"]
+    })
+
+# ======================
+# LOGIQUE DÉCISIONNELLE
+# ======================
+def decision_engine():
+    sto_state["rsi"] = simulate_rsi()
+    sto_state["ema"] = simulate_ema()
+    sto_state["position_size"] = calcul_position_size()
+
+    rsi = sto_state["rsi"]
+
+    if sto_state["mode_decision"] == "A":  # Conservateur
+        if rsi < 30:
+            sto_state["action"] = "SURVEILLANCE"
+            sto_state["raison"] = "RSI bas – prudence"
         else:
-            pertes -= delta
-    if pertes == 0:
-        return 100
-    rs = gains / pertes
-    return round(100 - (100 / (1 + rs)), 2)
+            sto_state["action"] = "ATTENTE"
+            sto_state["raison"] = "Aucune condition sûre"
 
-def position_sizing(capital, risque, stop_loss_pct):
-    risque_montant = capital * risque
-    taille = risque_montant / stop_loss_pct
-    return round(taille, 2)
+    elif sto_state["mode_decision"] == "B":  # Normal
+        if rsi < 35:
+            sto_state["action"] = "ENTREE_POTENTIELLE"
+            sto_state["raison"] = "RSI favorable"
+        else:
+            sto_state["action"] = "ATTENTE"
+            sto_state["raison"] = "Signal insuffisant"
+
+    elif sto_state["mode_decision"] == "C":  # Agressif
+        if rsi < 40:
+            sto_state["action"] = "ENTREE_SIMULEE"
+            sto_state["raison"] = "RSI opportunité agressive"
+        else:
+            sto_state["action"] = "ATTENTE"
+            sto_state["raison"] = "Marché neutre"
+
+    log_decision()
 
 # ======================
-# ROUTE PRINCIPALE
+# ROUTES API
 # ======================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "statut": sto_state["statut"],
-        "mode": sto_state["mode"],
+        "statut": "STO STABLE – MODE OFFLINE",
+        "uptime_sec": int(time.time() - sto_state["start_time"]),
         "mode_decision": sto_state["mode_decision"],
-        "temps_en_ligne": int(time.time() - sto_state["start_time"])
+        "profil_risque": sto_state["profil_risque"]
     })
 
-# ======================
-# TEST OFFLINE DU CŒUR
-# ======================
-@app.route("/test/offline", methods=["GET"])
-def test_offline():
-    # données simulées
-    prices = [100, 101, 102, 103, 102, 101, 104, 106, 107, 108, 109, 110]
-
-    ema_9 = calcul_ema(prices, 9)
-    ema_21 = calcul_ema(prices, 21)
-    rsi_14 = calcul_rsi(prices)
-
-    tendance = "INCONNUE"
-    action = "ATTENTE"
-
-    if ema_9 and ema_21 and rsi_14:
-        if ema_9 > ema_21 and rsi_14 < 70:
-            tendance = "HAUSSE"
-            action = "ENTRER_LONG"
-        elif ema_9 < ema_21 and rsi_14 > 30:
-            tendance = "BAISSE"
-            action = "ATTENTE"
-
-    taille_position = position_sizing(
-        sto_state["capital"],
-        RISQUE_PAR_TRADE,
-        0.02
-    )
-
-    decision = {
-        "ema_9": ema_9,
-        "ema_21": ema_21,
-        "rsi": rsi_14,
-        "tendance": tendance,
-        "action_STO": action,
-        "taille_position": taille_position
-    }
-
-    sto_state["last_action"] = action
-    sto_state["reason"] = "Décision OFFLINE calculée"
-    sto_state["journal"].append(decision)
-
+@app.route("/test/decision", methods=["GET"])
+def test_decision():
+    decision_engine()
     return jsonify({
-        "capital_simule": sto_state["capital"],
+        "action_STO": sto_state["action"],
         "mode_decision": sto_state["mode_decision"],
-        "decision": decision,
-        "statut": sto_state["statut"]
+        "rsi": sto_state["rsi"],
+        "ema": sto_state["ema"],
+        "position_size": sto_state["position_size"],
+        "capital_simule": sto_state["capital_simule"],
+        "raison": sto_state["raison"],
+        "statut": "TEST OK"
     })
 
-# ======================
-# JOURNAL
-# ======================
 @app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify({
-        "nombre_decisions": len(sto_state["journal"]),
-        "journal": sto_state["journal"]
-    })
+    return jsonify(sto_state["journal"][-10:])
 
-# ======================
-# AUTH
-# ======================
-@app.route("/auth/verify_qr", methods=["POST"])
-def verify_qr():
+@app.route("/config/mode", methods=["POST"])
+def set_mode():
     data = request.json or {}
-    if data.get("email") == ADMIN_EMAIL:
-        return jsonify({"acces": "admin"})
-    return jsonify({"acces": "utilisateur"})
+    mode = data.get("mode")
+    if mode in ["A", "B", "C"]:
+        sto_state["mode_decision"] = mode
+        return jsonify({"ok": True, "mode_decision": mode})
+    return jsonify({"ok": False}), 400
 
 # ======================
 # RUN
