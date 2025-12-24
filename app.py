@@ -5,21 +5,25 @@ import requests
 app = Flask(__name__)
 
 # ======================
-# CONFIG ADMIN
+# CONFIGURATION STO
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
+MODE_DECISION = "C"  # C = Hybride Pro
 
 # ======================
-# ÉTAT STO
+# ÉTAT INTERNE STO
 # ======================
 sto_state = {
     "mode": "OBSERVATION",
-    "mode_decision": "C",  # HYBRIDE PRO
     "market_status": "INIT",
     "last_action": "ATTENTE",
     "reason": "Initialisation STO",
+    "last_price": None,
+    "last_update": 0,
     "start_time": time.time()
 }
+
+CACHE_DURATION = 60  # secondes (anti-429)
 
 # ======================
 # PAGE PRINCIPALE
@@ -29,86 +33,111 @@ def home():
     return jsonify({
         "statut": "STO EN LIGNE",
         "mode": sto_state["mode"],
-        "mode_decision": sto_state["mode_decision"],
-        "uptime_sec": int(time.time() - sto_state["start_time"])
+        "mode_decision": MODE_DECISION,
+        "uptime_secondes": int(time.time() - sto_state["start_time"])
     })
 
 # ======================
-# OUTILS MARCHÉ
+# RÉCUPÉRATION PRIX (ROBUSTE)
 # ======================
-def get_btc_price():
-    """Source unique fiable : CoinGecko simple price"""
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": "bitcoin", "vs_currencies": "usd"}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    data = r.json()
-    return float(data["bitcoin"]["usd"])
+def fetch_price():
+    # 1️⃣ BINANCE
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            timeout=5
+        )
+        data = r.json()
+        return float(data["price"]), "BINANCE"
+    except:
+        pass
 
-def get_btc_24h_price():
-    """Prix BTC il y a 24h pour tendance"""
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    params = {"vs_currency": "usd", "days": 1}
-    r = requests.get(url, params=params, timeout=10)
-    r.raise_for_status()
-    prices = r.json().get("prices", [])
-    return float(prices[0][1]) if prices else None
+    # 2️⃣ COINGECKO SIMPLE
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd"},
+            timeout=5
+        )
+        data = r.json()
+        return float(data["bitcoin"]["usd"]), "COINGECKO"
+    except:
+        pass
+
+    # 3️⃣ CACHE
+    if sto_state["last_price"] is not None:
+        return sto_state["last_price"], "CACHE"
+
+    raise Exception("Aucune source marché disponible")
 
 # ======================
-# STATUT MARCHÉ
+# MARCHÉ + TENDANCE
 # ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
     try:
-        price_now = get_btc_price()
-        price_24h = get_btc_24h_price()
+        now = time.time()
 
-        if price_24h is None:
-            raise Exception("Historique insuffisant")
+        # Cache anti-spam
+        if now - sto_state["last_update"] < CACHE_DURATION:
+            return jsonify({
+                "statut_marche": "OK",
+                "prix_actuel": sto_state["last_price"],
+                "tendance": sto_state["market_status"],
+                "action_STO": sto_state["last_action"],
+                "raison": "Données en cache",
+                "mode_decision": MODE_DECISION,
+                "source": "CACHE"
+            })
 
-        delta = (price_now - price_24h) / price_24h * 100
+        price, source = fetch_price()
 
-        # === LOGIQUE HYBRIDE PRO ===
-        if delta > 1.2:
-            tendance = "HAUSSE"
-            action = "SURVEILLANCE_ACTIVE"
-            raison = "Avantage haussier détecté"
-        elif delta < -1.2:
-            tendance = "BAISSE"
+        # Calcul tendance locale
+        if sto_state["last_price"] is None:
+            tendance = "INCONNUE"
             action = "ATTENTE"
-            raison = "Risque baissier détecté"
+            raison = "Première observation"
         else:
-            tendance = "STABLE"
-            action = "ATTENTE"
-            raison = "Marché sans avantage clair"
+            delta = (price - sto_state["last_price"]) / sto_state["last_price"] * 100
 
-        sto_state["market_status"] = "OK"
-        sto_state["last_action"] = action
-        sto_state["reason"] = raison
+            if delta > 0.5:
+                tendance = "HAUSSE"
+                action = "SURVEILLANCE"
+                raison = "Momentum haussier détecté"
+            elif delta < -0.5:
+                tendance = "BAISSE"
+                action = "ATTENTE"
+                raison = "Risque baissier"
+            else:
+                tendance = "STABLE"
+                action = "ATTENTE"
+                raison = "Marché neutre"
+
+        # Mise à jour état
+        sto_state.update({
+            "market_status": tendance,
+            "last_action": action,
+            "reason": raison,
+            "last_price": price,
+            "last_update": now
+        })
 
         return jsonify({
             "statut_marche": "OK",
-            "source": "COINGECKO",
-            "mode_decision": "C",
-            "prix_actuel": round(price_now, 2),
-            "prix_24h_ago": round(price_24h, 2),
-            "variation_24h_pct": round(delta, 2),
+            "prix_actuel": round(price, 2),
             "tendance": tendance,
             "action_STO": action,
-            "raison": raison
+            "raison": raison,
+            "mode_decision": MODE_DECISION,
+            "source": source
         })
 
     except Exception as e:
-        # SÉCURITÉ ABSOLUE → retour mode A
-        sto_state["market_status"] = "ERREUR"
-        sto_state["last_action"] = "ATTENTE"
-        sto_state["reason"] = "Marché indisponible → sécurité"
-
         return jsonify({
             "statut_marche": "ERREUR",
-            "mode_decision": "A",
-            "prix_actuel": 0,
+            "prix_actuel": sto_state["last_price"] or 0,
             "action_STO": "ATTENTE",
+            "mode_decision": MODE_DECISION,
             "raison": str(e)
         }), 500
 
@@ -121,7 +150,7 @@ def bot_action():
         "action": sto_state["last_action"],
         "raison": sto_state["reason"],
         "mode": sto_state["mode"],
-        "mode_decision": sto_state["mode_decision"]
+        "mode_decision": MODE_DECISION
     })
 
 # ======================
@@ -130,7 +159,8 @@ def bot_action():
 @app.route("/auth/verify_qr", methods=["POST"])
 def verify_qr():
     data = request.json or {}
-    if data.get("email") == ADMIN_EMAIL:
+    email = data.get("email")
+    if email == ADMIN_EMAIL:
         return jsonify({"acces": "admin"})
     return jsonify({"acces": "utilisateur"})
 
