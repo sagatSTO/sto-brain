@@ -5,26 +5,19 @@ import requests
 app = Flask(__name__)
 
 # ======================
-# CONFIGURATION ADMIN
+# CONFIG ADMIN
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
-
-# ======================
-# CONFIGURATION MODE
-# A = PASSIF SÉCURISÉ
-# ======================
-MODE_DECISION = "A"  # A uniquement pour l’instant
 
 # ======================
 # ÉTAT STO
 # ======================
 sto_state = {
     "mode": "OBSERVATION",
-    "mode_decision": MODE_DECISION,
+    "mode_decision": "C",  # HYBRIDE PRO
     "market_status": "INIT",
     "last_action": "ATTENTE",
-    "reason": "STO démarre",
-    "last_price": None,
+    "reason": "Initialisation STO",
     "start_time": time.time()
 }
 
@@ -37,78 +30,87 @@ def home():
         "statut": "STO EN LIGNE",
         "mode": sto_state["mode"],
         "mode_decision": sto_state["mode_decision"],
-        "temps_en_ligne_secondes": int(time.time() - sto_state["start_time"])
+        "uptime_sec": int(time.time() - sto_state["start_time"])
     })
 
 # ======================
-# FONCTION PRIX BTC (ROBUSTE)
+# OUTILS MARCHÉ
 # ======================
 def get_btc_price():
-    # Source principale : CoinGecko
-    try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bitcoin", "vs_currencies": "usd"},
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            price = data.get("bitcoin", {}).get("usd")
-            if isinstance(price, (int, float)):
-                return price, "COINGECKO"
-    except:
-        pass
+    """Source unique fiable : CoinGecko simple price"""
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {"ids": "bitcoin", "vs_currencies": "usd"}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    return float(data["bitcoin"]["usd"])
 
-    # Fallback : Binance
-    try:
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-            timeout=10
-        )
-        if r.status_code == 200:
-            data = r.json()
-            price = float(data.get("price"))
-            return price, "BINANCE"
-    except:
-        pass
-
-    return None, None
+def get_btc_24h_price():
+    """Prix BTC il y a 24h pour tendance"""
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+    params = {"vs_currency": "usd", "days": 1}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    prices = r.json().get("prices", [])
+    return float(prices[0][1]) if prices else None
 
 # ======================
-# MARCHÉ : PRIX + LOGIQUE MODE A
+# STATUT MARCHÉ
 # ======================
 @app.route("/market/status", methods=["GET"])
 def market_status():
-    price, source = get_btc_price()
+    try:
+        price_now = get_btc_price()
+        price_24h = get_btc_24h_price()
 
-    if price is None:
+        if price_24h is None:
+            raise Exception("Historique insuffisant")
+
+        delta = (price_now - price_24h) / price_24h * 100
+
+        # === LOGIQUE HYBRIDE PRO ===
+        if delta > 1.2:
+            tendance = "HAUSSE"
+            action = "SURVEILLANCE_ACTIVE"
+            raison = "Avantage haussier détecté"
+        elif delta < -1.2:
+            tendance = "BAISSE"
+            action = "ATTENTE"
+            raison = "Risque baissier détecté"
+        else:
+            tendance = "STABLE"
+            action = "ATTENTE"
+            raison = "Marché sans avantage clair"
+
+        sto_state["market_status"] = "OK"
+        sto_state["last_action"] = action
+        sto_state["reason"] = raison
+
+        return jsonify({
+            "statut_marche": "OK",
+            "source": "COINGECKO",
+            "mode_decision": "C",
+            "prix_actuel": round(price_now, 2),
+            "prix_24h_ago": round(price_24h, 2),
+            "variation_24h_pct": round(delta, 2),
+            "tendance": tendance,
+            "action_STO": action,
+            "raison": raison
+        })
+
+    except Exception as e:
+        # SÉCURITÉ ABSOLUE → retour mode A
         sto_state["market_status"] = "ERREUR"
         sto_state["last_action"] = "ATTENTE"
-        sto_state["reason"] = "Aucune source marché disponible"
+        sto_state["reason"] = "Marché indisponible → sécurité"
 
         return jsonify({
             "statut_marche": "ERREUR",
+            "mode_decision": "A",
             "prix_actuel": 0,
             "action_STO": "ATTENTE",
-            "mode_decision": MODE_DECISION,
-            "raison": "Aucune source marché disponible"
+            "raison": str(e)
         }), 500
-
-    # ----- MODE A : PASSIF -----
-    sto_state["market_status"] = "OK"
-    sto_state["last_action"] = "OBSERVATION"
-    sto_state["reason"] = "Mode A actif : observation uniquement"
-    sto_state["last_price"] = price
-
-    return jsonify({
-        "statut_marche": "OK",
-        "source": source,
-        "prix_actuel": round(price, 2),
-        "action_STO": "OBSERVATION",
-        "mode_decision": MODE_DECISION,
-        "tendance": "NON ANALYSÉE (MODE A)",
-        "raison": sto_state["reason"]
-    })
 
 # ======================
 # ACTION STO
@@ -123,13 +125,12 @@ def bot_action():
     })
 
 # ======================
-# AUTHENTIFICATION
+# AUTH
 # ======================
 @app.route("/auth/verify_qr", methods=["POST"])
 def verify_qr():
     data = request.json or {}
-    email = data.get("email")
-    if email == ADMIN_EMAIL:
+    if data.get("email") == ADMIN_EMAIL:
         return jsonify({"acces": "admin"})
     return jsonify({"acces": "utilisateur"})
 
