@@ -1,116 +1,147 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import time
+import math
 
 app = Flask(__name__)
 
 # ======================
-# CONFIG GLOBALE
+# CONFIG ADMIN
 # ======================
-STO_VERSION = "1.0-OFFLINE"
-CAPITAL_SIMULE = 1000.0  # capital fictif
-RISQUE_PAR_TRADE = 0.02  # 2%
+ADMIN_EMAIL = "saguiorelio32@gmail.com"
+
+# ======================
+# CONFIG STO
+# ======================
+CAPITAL_SIMULE = 1000.0  # capital de test
+RISQUE_PAR_TRADE = 0.01  # 1% par trade
+MODE_DECISION = "C"      # A = passif, B = semi, C = pro
 
 # ======================
 # ÉTAT STO
 # ======================
 sto_state = {
-    "mode_decision": "C",  # A=passif, B=semi, C=agressif
+    "mode": "OFFLINE",
+    "mode_decision": MODE_DECISION,
     "statut": "STO STABLE – MODE OFFLINE",
     "capital": CAPITAL_SIMULE,
     "last_action": "ATTENTE",
     "reason": "Initialisation",
-    "start_time": time.time()
+    "start_time": time.time(),
+    "journal": []
 }
 
 # ======================
-# INDICATEURS OFFLINE (SIMULÉS)
+# OUTILS TECHNIQUES (OFFLINE)
 # ======================
-def calcul_rsi(prices):
-    gains = []
-    losses = []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i - 1]
-        if diff > 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
-    avg_gain = sum(gains) / max(len(gains), 1)
-    avg_loss = sum(losses) / max(len(losses), 1)
-    if avg_loss == 0:
-        return 70
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
-
 def calcul_ema(prices, period):
+    if len(prices) < period:
+        return None
     k = 2 / (period + 1)
     ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
+    for p in prices[1:]:
+        ema = p * k + ema * (1 - k)
     return round(ema, 2)
 
-# ======================
-# LOGIQUE DÉCISIONNELLE C (PRO)
-# ======================
-def decision_engine():
-    prices = [87000, 87200, 87150, 87300, 87500, 87400]
-    rsi = calcul_rsi(prices)
-    ema_fast = calcul_ema(prices, 5)
-    ema_slow = calcul_ema(prices, 10)
+def calcul_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return None
+    gains, pertes = 0, 0
+    for i in range(1, period + 1):
+        delta = prices[i] - prices[i - 1]
+        if delta > 0:
+            gains += delta
+        else:
+            pertes -= delta
+    if pertes == 0:
+        return 100
+    rs = gains / pertes
+    return round(100 - (100 / (1 + rs)), 2)
 
-    position_size = sto_state["capital"] * RISQUE_PAR_TRADE
-
-    if rsi < 30 and ema_fast > ema_slow:
-        action = "ACHAT"
-        reason = "RSI survendu + EMA haussière"
-    elif rsi > 70 and ema_fast < ema_slow:
-        action = "VENTE"
-        reason = "RSI suracheté + EMA baissière"
-    else:
-        action = "ATTENTE"
-        reason = "Aucune condition optimale"
-
-    return {
-        "action_STO": action,
-        "raison": reason,
-        "RSI": rsi,
-        "EMA_fast": ema_fast,
-        "EMA_slow": ema_slow,
-        "position_size": round(position_size, 2)
-    }
+def position_sizing(capital, risque, stop_loss_pct):
+    risque_montant = capital * risque
+    taille = risque_montant / stop_loss_pct
+    return round(taille, 2)
 
 # ======================
-# ROUTES API
+# ROUTE PRINCIPALE
 # ======================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "statut": sto_state["statut"],
-        "version": STO_VERSION,
+        "mode": sto_state["mode"],
         "mode_decision": sto_state["mode_decision"],
-        "capital_simule": sto_state["capital"],
-        "uptime_sec": int(time.time() - sto_state["start_time"])
+        "temps_en_ligne": int(time.time() - sto_state["start_time"])
     })
 
-@app.route("/decision", methods=["GET"])
-def decision():
-    result = decision_engine()
-    sto_state["last_action"] = result["action_STO"]
-    sto_state["reason"] = result["raison"]
+# ======================
+# TEST OFFLINE DU CŒUR
+# ======================
+@app.route("/test/offline", methods=["GET"])
+def test_offline():
+    # données simulées
+    prices = [100, 101, 102, 103, 102, 101, 104, 106, 107, 108, 109, 110]
+
+    ema_9 = calcul_ema(prices, 9)
+    ema_21 = calcul_ema(prices, 21)
+    rsi_14 = calcul_rsi(prices)
+
+    tendance = "INCONNUE"
+    action = "ATTENTE"
+
+    if ema_9 and ema_21 and rsi_14:
+        if ema_9 > ema_21 and rsi_14 < 70:
+            tendance = "HAUSSE"
+            action = "ENTRER_LONG"
+        elif ema_9 < ema_21 and rsi_14 > 30:
+            tendance = "BAISSE"
+            action = "ATTENTE"
+
+    taille_position = position_sizing(
+        sto_state["capital"],
+        RISQUE_PAR_TRADE,
+        0.02
+    )
+
+    decision = {
+        "ema_9": ema_9,
+        "ema_21": ema_21,
+        "rsi": rsi_14,
+        "tendance": tendance,
+        "action_STO": action,
+        "taille_position": taille_position
+    }
+
+    sto_state["last_action"] = action
+    sto_state["reason"] = "Décision OFFLINE calculée"
+    sto_state["journal"].append(decision)
 
     return jsonify({
-        "statut": "OK",
+        "capital_simule": sto_state["capital"],
         "mode_decision": sto_state["mode_decision"],
-        **result
+        "decision": decision,
+        "statut": sto_state["statut"]
     })
 
+# ======================
+# JOURNAL
+# ======================
 @app.route("/journal", methods=["GET"])
 def journal():
     return jsonify({
-        "last_action": sto_state["last_action"],
-        "reason": sto_state["reason"],
-        "capital": sto_state["capital"],
-        "mode_decision": sto_state["mode_decision"]
+        "nombre_decisions": len(sto_state["journal"]),
+        "journal": sto_state["journal"]
     })
+
+# ======================
+# AUTH
+# ======================
+@app.route("/auth/verify_qr", methods=["POST"])
+def verify_qr():
+    data = request.json or {}
+    if data.get("email") == ADMIN_EMAIL:
+        return jsonify({"acces": "admin"})
+    return jsonify({"acces": "utilisateur"})
 
 # ======================
 # RUN
