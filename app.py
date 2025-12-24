@@ -1,117 +1,116 @@
 from flask import Flask, jsonify
 import time
-import statistics
 
 app = Flask(__name__)
 
 # ======================
-# CONFIG STO
+# CONFIG GLOBALE
 # ======================
-STO_MODE = "C"  # A = conservateur | B = normal | C = hybride pro
-RISK_PROFILE = {
-    "A": 0.01,   # 1% du capital
-    "B": 0.02,   # 2%
-    "C": 0.03    # 3%
+STO_VERSION = "1.0-OFFLINE"
+CAPITAL_SIMULE = 1000.0  # capital fictif
+RISQUE_PAR_TRADE = 0.02  # 2%
+
+# ======================
+# ÉTAT STO
+# ======================
+sto_state = {
+    "mode_decision": "C",  # A=passif, B=semi, C=agressif
+    "statut": "STO STABLE – MODE OFFLINE",
+    "capital": CAPITAL_SIMULE,
+    "last_action": "ATTENTE",
+    "reason": "Initialisation",
+    "start_time": time.time()
 }
 
-CAPITAL = 1000  # capital simulé
-DECISION_LOG = []
+# ======================
+# INDICATEURS OFFLINE (SIMULÉS)
+# ======================
+def calcul_rsi(prices):
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i - 1]
+        if diff > 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
+    avg_gain = sum(gains) / max(len(gains), 1)
+    avg_loss = sum(losses) / max(len(losses), 1)
+    if avg_loss == 0:
+        return 70
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
 
-# ======================
-# OUTILS INDICATEURS
-# ======================
-def calculate_ema(prices, period):
+def calcul_ema(prices, period):
     k = 2 / (period + 1)
     ema = prices[0]
     for price in prices[1:]:
         ema = price * k + ema * (1 - k)
-    return ema
-
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return 50  # neutre
-
-    gains = []
-    losses = []
-    for i in range(1, period + 1):
-        delta = prices[-i] - prices[-i - 1]
-        if delta >= 0:
-            gains.append(delta)
-        else:
-            losses.append(abs(delta))
-
-    avg_gain = statistics.mean(gains) if gains else 0
-    avg_loss = statistics.mean(losses) if losses else 1
-
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0
-    return round(100 - (100 / (1 + rs)), 2)
+    return round(ema, 2)
 
 # ======================
-# DONNÉES SIMULÉES
+# LOGIQUE DÉCISIONNELLE C (PRO)
 # ======================
-def simulated_prices():
-    # Simulation réaliste de marché
-    base = 87000
-    return [base + i * 15 for i in range(30)]
+def decision_engine():
+    prices = [87000, 87200, 87150, 87300, 87500, 87400]
+    rsi = calcul_rsi(prices)
+    ema_fast = calcul_ema(prices, 5)
+    ema_slow = calcul_ema(prices, 10)
 
-# ======================
-# LOGIQUE DÉCISIONNELLE
-# ======================
-def sto_decision():
-    prices = simulated_prices()
+    position_size = sto_state["capital"] * RISQUE_PAR_TRADE
 
-    ema_short = calculate_ema(prices[-10:], 10)
-    ema_long = calculate_ema(prices[-20:], 20)
-    rsi = calculate_rsi(prices)
-
-    if ema_short > ema_long and rsi < 70:
-        action = "PREPARATION_ENTREE"
-        reason = "Tendance haussière + RSI sain"
-    elif rsi > 70:
-        action = "ATTENTE"
-        reason = "Marché suracheté"
-    elif rsi < 30:
-        action = "OBSERVATION"
-        reason = "Zone survendue"
+    if rsi < 30 and ema_fast > ema_slow:
+        action = "ACHAT"
+        reason = "RSI survendu + EMA haussière"
+    elif rsi > 70 and ema_fast < ema_slow:
+        action = "VENTE"
+        reason = "RSI suracheté + EMA baissière"
     else:
         action = "ATTENTE"
-        reason = "Aucune opportunité claire"
+        reason = "Aucune condition optimale"
 
-    risk = RISK_PROFILE[STO_MODE]
-    position_size = round(CAPITAL * risk, 2)
-
-    log = {
-        "time": int(time.time()),
-        "mode": STO_MODE,
-        "ema_short": round(ema_short, 2),
-        "ema_long": round(ema_long, 2),
-        "rsi": rsi,
-        "action": action,
-        "position_size": position_size,
-        "reason": reason
+    return {
+        "action_STO": action,
+        "raison": reason,
+        "RSI": rsi,
+        "EMA_fast": ema_fast,
+        "EMA_slow": ema_slow,
+        "position_size": round(position_size, 2)
     }
 
-    DECISION_LOG.append(log)
-    return log
-
 # ======================
-# ROUTES
+# ROUTES API
 # ======================
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "statut": "STO STABLE – MODE OFFLINE",
-        "mode_decision": STO_MODE,
-        "capital_simule": CAPITAL
+        "statut": sto_state["statut"],
+        "version": STO_VERSION,
+        "mode_decision": sto_state["mode_decision"],
+        "capital_simule": sto_state["capital"],
+        "uptime_sec": int(time.time() - sto_state["start_time"])
     })
 
 @app.route("/decision", methods=["GET"])
 def decision():
-    return jsonify(sto_decision())
+    result = decision_engine()
+    sto_state["last_action"] = result["action_STO"]
+    sto_state["reason"] = result["raison"]
+
+    return jsonify({
+        "statut": "OK",
+        "mode_decision": sto_state["mode_decision"],
+        **result
+    })
 
 @app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify(DECISION_LOG[-10:])  # dernières décisions
+    return jsonify({
+        "last_action": sto_state["last_action"],
+        "reason": sto_state["reason"],
+        "capital": sto_state["capital"],
+        "mode_decision": sto_state["mode_decision"]
+    })
 
 # ======================
 # RUN
