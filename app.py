@@ -5,19 +5,19 @@ from statistics import mean
 app = Flask(__name__)
 
 # ======================
-# CONFIG
+# CONFIG STO
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
+START_TIME = time.time()
 
 # ======================
 # ÉTAT STO
 # ======================
 sto_state = {
-    "mode": "SEMI_ACTIF",
-    "mode_decision": "C",
-    "last_action": "OBSERVATION",
-    "reason": "Initialisation STO",
-    "start_time": time.time()
+    "mode": "OFFLINE",
+    "decision_mode": "C",   # A / B / C
+    "last_action": "ATTENTE",
+    "reason": "STO STABLE – MODE OFFLINE",
 }
 
 # ======================
@@ -26,8 +26,10 @@ sto_state = {
 decision_log = []
 
 def log_decision(data):
-    data["timestamp"] = int(time.time())
-    decision_log.append(data)
+    decision_log.append({
+        "time": int(time.time()),
+        **data
+    })
     if len(decision_log) > 100:
         decision_log.pop(0)
 
@@ -35,13 +37,11 @@ def log_decision(data):
 # INDICATEURS
 # ======================
 def ema(prices, period):
-    if len(prices) < period:
-        return None
     k = 2 / (period + 1)
-    value = prices[0]
+    e = prices[0]
     for p in prices[1:]:
-        value = p * k + value * (1 - k)
-    return round(value, 2)
+        e = p * k + e * (1 - k)
+    return round(e, 2)
 
 def rsi(prices, period=14):
     if len(prices) < period + 1:
@@ -66,8 +66,8 @@ def home():
     return jsonify({
         "statut": "STO EN LIGNE",
         "mode": sto_state["mode"],
-        "mode_decision": sto_state["mode_decision"],
-        "uptime_sec": int(time.time() - sto_state["start_time"])
+        "decision": sto_state["decision_mode"],
+        "uptime_sec": int(time.time() - START_TIME)
     })
 
 # ======================
@@ -76,51 +76,49 @@ def home():
 @app.route("/simulate")
 def simulate():
     raw = request.args.get("prices", "")
-    try:
-        prices = [float(x) for x in raw.split(",") if x.strip()]
-        if len(prices) < 20:
-            return jsonify({
-                "statut_marche": "ERREUR",
-                "raison": "Pas assez de données simulées (min 20)"
-            })
+    prices = [float(p) for p in raw.split(",") if p.strip()]
 
-        r = rsi(prices)
-        e_fast = ema(prices, 10)
-        e_slow = ema(prices, 20)
-
-        if r is None or e_fast is None or e_slow is None:
-            raise Exception("Calcul indicateurs impossible")
-
-        if r > 60 and e_fast > e_slow:
-            signal = "ACHAT"
-        elif r < 40 and e_fast < e_slow:
-            signal = "VENTE"
-        else:
-            signal = "ATTENTE"
-
-        log_decision({
-            "prix": prices[-1],
-            "RSI": r,
-            "EMA_10": e_fast,
-            "EMA_20": e_slow,
-            "signal": signal
-        })
-
-        return jsonify({
-            "statut_marche": "OK",
-            "prix_actuel": prices[-1],
-            "RSI": r,
-            "EMA_10": e_fast,
-            "EMA_20": e_slow,
-            "action_STO": signal,
-            "mode_decision": sto_state["mode_decision"]
-        })
-
-    except Exception as e:
+    if len(prices) < 20:
         return jsonify({
             "statut_marche": "ERREUR",
-            "raison": str(e)
-        })
+            "raison": "Pas assez de données simulées (min 20)"
+        }), 400
+
+    rsi_val = rsi(prices)
+    ema_fast = ema(prices[-20:], 10)
+    ema_slow = ema(prices[-20:], 20)
+
+    signal = "STABLE"
+    action = "ATTENTE"
+
+    if rsi_val > 60 and ema_fast > ema_slow:
+        signal = "HAUSSE"
+        action = "SURVEILLANCE"
+    elif rsi_val < 40 and ema_fast < ema_slow:
+        signal = "BAISSE"
+        action = "ATTENTE"
+
+    sto_state["last_action"] = action
+    sto_state["reason"] = f"RSI {rsi_val} / EMA"
+
+    log_decision({
+        "prix": prices[-1],
+        "RSI": rsi_val,
+        "EMA10": ema_fast,
+        "EMA20": ema_slow,
+        "signal": signal,
+        "action": action
+    })
+
+    return jsonify({
+        "statut_marche": "OK",
+        "prix_actuel": prices[-1],
+        "RSI": rsi_val,
+        "EMA10": ema_fast,
+        "EMA20": ema_slow,
+        "signal": signal,
+        "action_STO": action
+    })
 
 # ======================
 # JOURNAL API
@@ -134,44 +132,48 @@ def journal():
 # ======================
 @app.route("/dashboard")
 def dashboard():
+    prices = [d["prix"] for d in decision_log if "prix" in d]
+    rsi_vals = [d["RSI"] for d in decision_log if "RSI" in d]
+
     html = """
     <html>
     <head>
         <title>STO Dashboard</title>
-        <style>
-            body { background:#0f172a; color:white; font-family:Arial }
-            h1 { color:#38bdf8 }
-            table { border-collapse: collapse; width:100% }
-            th, td { border:1px solid #334155; padding:6px; text-align:center }
-            th { background:#1e293b }
-        </style>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
-    <body>
-        <h1>📊 STO – Dashboard Décisionnel</h1>
-        <table>
-            <tr>
-                <th>Temps</th>
-                <th>Prix</th>
-                <th>RSI</th>
-                <th>EMA 10</th>
-                <th>EMA 20</th>
-                <th>Action</th>
-            </tr>
-            {% for d in logs %}
-            <tr>
-                <td>{{ d.timestamp }}</td>
-                <td>{{ d.prix }}</td>
-                <td>{{ d.RSI }}</td>
-                <td>{{ d.EMA_10 }}</td>
-                <td>{{ d.EMA_20 }}</td>
-                <td>{{ d.signal }}</td>
-            </tr>
-            {% endfor %}
-        </table>
+    <body style="font-family:Arial;background:#111;color:#eee">
+        <h1>STO Dashboard</h1>
+        <p>Mode: {{mode}} | Décision: {{decision}}</p>
+
+        <canvas id="priceChart"></canvas>
+        <canvas id="rsiChart"></canvas>
+
+        <script>
+        const prices = {{prices}};
+        const rsi = {{rsi}};
+
+        new Chart(document.getElementById('priceChart'), {
+            type: 'line',
+            data: { labels: prices.map((_,i)=>i),
+                datasets:[{label:'Prix',data:prices,borderColor:'lime'}]}
+        });
+
+        new Chart(document.getElementById('rsiChart'), {
+            type: 'line',
+            data: { labels: rsi.map((_,i)=>i),
+                datasets:[{label:'RSI',data:rsi,borderColor:'orange'}]}
+        });
+        </script>
     </body>
     </html>
     """
-    return render_template_string(html, logs=decision_log)
+    return render_template_string(
+        html,
+        prices=prices,
+        rsi=rsi_vals,
+        mode=sto_state["mode"],
+        decision=sto_state["decision_mode"]
+    )
 
 # ======================
 # RUN
