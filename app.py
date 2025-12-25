@@ -1,36 +1,116 @@
 from flask import Flask, request, jsonify
 import time
+import requests
 from statistics import mean
 
 app = Flask(__name__)
 
 # ======================
-# CONFIGURATION STO
+# CONFIG
 # ======================
-STO_NAME = "STO"
-VERSION = "1.0-OFFLINE"
-START_TIME = time.time()
+ADMIN_EMAIL = "saguiorelio32@gmail.com"
+CACHE_TTL = 60  # secondes
 
 # ======================
-# ÉTAT GLOBAL
+# ÉTAT STO
 # ======================
 sto_state = {
-    "mode": "OFFLINE",
-    "decision_mode": "C",  # C = logique hybride pro
+    "mode": "OBSERVATION",
+    "market_status": "OFFLINE",
     "last_action": "ATTENTE",
     "reason": "STO initialisé",
+    "start_time": time.time()
 }
 
 # ======================
-# OUTILS INDICATEURS
+# CACHE MARCHÉ
+# ======================
+market_cache = {
+    "price": None,
+    "timestamp": 0,
+    "source": None
+}
+
+# ======================
+# PAGE RACINE
+# ======================
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "statut": "STO EN LIGNE",
+        "mode": sto_state["mode"],
+        "uptime_sec": int(time.time() - sto_state["start_time"])
+    })
+
+# ======================
+# FONCTION CACHE PRIX
+# ======================
+def get_cached_price():
+    now = time.time()
+
+    # 1️⃣ Cache valide
+    if market_cache["price"] and (now - market_cache["timestamp"] < CACHE_TTL):
+        return market_cache["price"], market_cache["source"], "CACHE"
+
+    # 2️⃣ Tentative CoinGecko
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd"},
+            timeout=10
+        )
+        data = r.json()
+        price = data["bitcoin"]["usd"]
+
+        market_cache["price"] = price
+        market_cache["timestamp"] = now
+        market_cache["source"] = "COINGECKO"
+
+        return price, "COINGECKO", "LIVE"
+
+    except:
+        # 3️⃣ Fallback ultime
+        if market_cache["price"]:
+            return market_cache["price"], market_cache["source"], "STALE"
+
+        return None, None, "ERROR"
+
+# ======================
+# MARCHÉ STATUS
+# ======================
+@app.route("/market/status", methods=["GET"])
+def market_status():
+    price, source, mode = get_cached_price()
+
+    if price is None:
+        sto_state["market_status"] = "ERREUR"
+        sto_state["reason"] = "Aucune donnée marché disponible"
+        return jsonify({
+            "statut_marche": "ERREUR",
+            "raison": sto_state["reason"]
+        }), 500
+
+    sto_state["market_status"] = "OK"
+    sto_state["last_action"] = "OBSERVATION"
+    sto_state["reason"] = "Prix disponible"
+
+    return jsonify({
+        "statut_marche": "OK",
+        "prix_actuel": round(price, 2),
+        "source": source,
+        "mode_cache": mode,
+        "action_STO": "OBSERVATION",
+        "raison": sto_state["reason"]
+    })
+
+# ======================
+# SIMULATION RSI / EMA
 # ======================
 def calculate_ema(prices, period):
-    if len(prices) < period:
-        return None
     k = 2 / (period + 1)
     ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
+    for p in prices[1:]:
+        ema = p * k + ema * (1 - k)
     return round(ema, 2)
 
 def calculate_rsi(prices, period=14):
@@ -40,7 +120,7 @@ def calculate_rsi(prices, period=14):
     for i in range(1, len(prices)):
         delta = prices[i] - prices[i-1]
         gains.append(max(delta, 0))
-        losses.append(max(-delta, 0))
+        losses.append(abs(min(delta, 0)))
     avg_gain = mean(gains[:period])
     avg_loss = mean(losses[:period])
     if avg_loss == 0:
@@ -48,95 +128,53 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-# ======================
-# PAGE PRINCIPALE
-# ======================
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({
-        "STO": STO_NAME,
-        "version": VERSION,
-        "mode": sto_state["mode"],
-        "decision_mode": sto_state["decision_mode"],
-        "uptime_seconds": int(time.time() - START_TIME),
-        "status": "STO STABLE – MODE OFFLINE"
-    })
-
-# ======================
-# SIMULATION OFFLINE
-# ======================
 @app.route("/simulate", methods=["GET"])
 def simulate():
     raw = request.args.get("prices", "")
-    try:
-        prices = [float(x) for x in raw.split(",") if x.strip()]
-        if len(prices) < 20:
-            return jsonify({
-                "statut_marche": "ERREUR",
-                "raison": "Pas assez de données simulées (>=20 requises)"
-            }), 400
+    prices = [float(x) for x in raw.split(",") if x.strip()]
 
-        ema_short = calculate_ema(prices, 10)
-        ema_long = calculate_ema(prices, 20)
-        rsi = calculate_rsi(prices)
-
-        # Décision hybride C
-        if rsi and rsi < 35 and ema_short > ema_long:
-            action = "ACHAT_SIMULÉ"
-            tendance = "HAUSSE_POTENTIELLE"
-        elif rsi and rsi > 65 and ema_short < ema_long:
-            action = "VENTE_SIMULÉE"
-            tendance = "FAIBLESSE_POTENTIELLE"
-        else:
-            action = "ATTENTE"
-            tendance = "STABLE"
-
-        sto_state["last_action"] = action
-        sto_state["reason"] = "Décision basée sur RSI + EMA offline"
-
-        return jsonify({
-            "statut_marche": "OK",
-            "mode": "OFFLINE",
-            "prix_final": prices[-1],
-            "RSI": rsi,
-            "EMA_10": ema_short,
-            "EMA_20": ema_long,
-            "tendance": tendance,
-            "action_STO": action,
-            "raison": sto_state["reason"]
-        })
-
-    except Exception as e:
+    if len(prices) < 20:
         return jsonify({
             "statut_marche": "ERREUR",
-            "raison": str(e)
-        }), 500
+            "raison": "Pas assez de données simulées (min 20)"
+        }), 400
+
+    rsi = calculate_rsi(prices)
+    ema_fast = calculate_ema(prices, 10)
+    ema_slow = calculate_ema(prices, 20)
+
+    signal = "NEUTRE"
+    if rsi and rsi > 60 and ema_fast > ema_slow:
+        signal = "HAUSSE"
+    elif rsi and rsi < 40 and ema_fast < ema_slow:
+        signal = "BAISSE"
+
+    return jsonify({
+        "RSI": rsi,
+        "EMA_10": ema_fast,
+        "EMA_20": ema_slow,
+        "signal": signal,
+        "statut": "SIMULATION OK"
+    })
 
 # ======================
-# JOURNAL DES DÉCISIONS (VISUEL 1)
+# JOURNAL (VISUEL 1)
 # ======================
+decision_log = []
+
 @app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify({
-        "dernier_mode": sto_state["decision_mode"],
-        "derniere_action": sto_state["last_action"],
-        "raison": sto_state["reason"],
-        "timestamp": int(time.time())
-    })
+    return jsonify(decision_log[-50:])
 
 # ======================
-# DASHBOARD SYNTHÈSE (VISUEL 2)
+# AUTH
 # ======================
-@app.route("/dashboard", methods=["GET"])
-def dashboard():
-    return jsonify({
-        "STO": STO_NAME,
-        "version": VERSION,
-        "mode": sto_state["mode"],
-        "decision_mode": sto_state["decision_mode"],
-        "action_actuelle": sto_state["last_action"],
-        "etat": "PRÊT POUR MARCHÉ RÉEL"
-    })
+@app.route("/auth/verify_qr", methods=["POST"])
+def verify_qr():
+    data = request.json or {}
+    if data.get("email") == ADMIN_EMAIL:
+        return jsonify({"acces": "admin"})
+    return jsonify({"acces": "utilisateur"})
 
 # ======================
 # RUN
