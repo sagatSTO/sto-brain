@@ -144,5 +144,68 @@ def verify_qr():
 # ======================
 # RUN
 # ======================
+from flask import Response
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>STO Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body style="font-family: Arial; background:#0e1117; color:white; padding:20px">
+
+<h1>📊 STO – Dashboard</h1>
+
+<p><b>Mode :</b> <span id="mode">-</span></p>
+<p><b>Dernière action :</b> <span id="action">-</span></p>
+<p><b>Raison :</b> <span id="raison">-</span></p>
+
+<canvas id="priceChart" width="600" height="300"></canvas>
+
+<script>
+async function loadData() {
+    const prices = [100,102,101,105,108,110,109,111,115,118,120,122,125,127,130,128,129,131,133,135];
+
+    const r = await fetch("/simulate?prices=" + prices.join(","));
+    const data = await r.json();
+
+    document.getElementById("mode").innerText = "OFFLINE";
+    document.getElementById("action").innerText = data.signal || "NEUTRE";
+    document.getElementById("raison").innerText = "Simulation locale";
+
+    const ctx = document.getElementById("priceChart").getContext("2d");
+    new Chart(ctx, {
+        type: "line",
+        data: {
+            labels: prices.map((_,i)=>i+1),
+            datasets: [{
+                label: "Prix simulé",
+                data: prices,
+                borderColor: "lime",
+                tension: 0.3
+            }]
+        },
+        options: {
+            plugins: {
+                legend: { labels: { color: "white" } }
+            },
+            scales: {
+                x: { ticks: { color: "white" } },
+                y: { ticks: { color: "white" } }
+            }
+        }
+    });
+}
+
+loadData();
+</script>
+
+</body>
+</html>
+"""
+    return Response(html, mimetype="text/html")
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
