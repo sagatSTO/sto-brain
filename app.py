@@ -140,10 +140,6 @@ def verify_qr():
     return jsonify({
         "acces": "admin" if data.get("email") == ADMIN_EMAIL else "utilisateur"
     })
-
-# ======================
-# RUN
-# ======================
 from flask import Response
 
 @app.route("/dashboard", methods=["GET"])
@@ -207,5 +203,8 @@ loadData();
 </html>
 """
     return Response(html, mimetype="text/html")
+# ======================
+# RUN
+# ======================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
