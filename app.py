@@ -1,31 +1,25 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
 import time
 from statistics import mean
 
 app = Flask(__name__)
 
 # ======================
-# CONFIG
+# CONFIG STO
 # ======================
-MODE = "OFFLINE"
-MODE_DECISION = "C"   # A / B / C
-CAPITAL_INITIAL = 1000.0
+ADMIN_EMAIL = "saguiorelio32@gmail.com"
+INITIAL_CAPITAL = 1000
+RISK_PER_TRADE = 0.02  # 2%
 
 # ======================
-# ÉTAT GLOBAL
+# ÉTAT STO
 # ======================
 sto_state = {
-    "capital": CAPITAL_INITIAL,
-    "position": None,   # None / LONG
-    "last_price": None,
-    "mode": MODE,
-    "mode_decision": MODE_DECISION,
-    "start_time": time.time()
+    "mode": "PAPER",
+    "decision_mode": "C",
+    "start_time": time.time(),
+    "journal": []
 }
-
-# CACHE & JOURNAL
-cache_market = {}
-journal = []
 
 # ======================
 # INDICATEURS
@@ -35,8 +29,8 @@ def calculate_ema(prices, period):
         return None
     k = 2 / (period + 1)
     ema = prices[0]
-    for p in prices[1:]:
-        ema = p * k + ema * (1 - k)
+    for price in prices[1:]:
+        ema = price * k + ema * (1 - k)
     return round(ema, 2)
 
 def calculate_rsi(prices, period=14):
@@ -44,9 +38,9 @@ def calculate_rsi(prices, period=14):
         return None
     gains, losses = [], []
     for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
+        diff = prices[i] - prices[i - 1]
         gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
+        losses.append(-min(diff, 0))
     avg_gain = mean(gains[:period])
     avg_loss = mean(losses[:period])
     if avg_loss == 0:
@@ -55,100 +49,85 @@ def calculate_rsi(prices, period=14):
     return round(100 - (100 / (1 + rs)), 2)
 
 # ======================
-# SIMULATION + PAPER
+# BACKTEST MOTEUR
 # ======================
-@app.route("/simulate", methods=["GET"])
-def simulate():
-    raw = request.args.get("prices", "")
-    prices = [float(x) for x in raw.split(",") if x.strip()]
+def backtest_series(prices):
+    capital = INITIAL_CAPITAL
+    position = 0
+    decisions = []
 
-    if len(prices) < 20:
-        return jsonify({
-            "statut_marche": "ERREUR",
-            "raison": "Pas assez de données simulées"
+    for i in range(20, len(prices)):
+        window = prices[:i]
+        price = prices[i]
+        rsi = calculate_rsi(window)
+        ema_fast = calculate_ema(window, 10)
+        ema_slow = calculate_ema(window, 20)
+
+        action = "HOLD"
+
+        if rsi and ema_fast and ema_slow:
+            if rsi < 30 and ema_fast > ema_slow:
+                risk_amount = capital * RISK_PER_TRADE
+                position = risk_amount / price
+                capital -= risk_amount
+                action = "BUY"
+            elif rsi > 70 and position > 0:
+                capital += position * price
+                position = 0
+                action = "SELL"
+
+        decisions.append({
+            "price": price,
+            "rsi": rsi,
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
+            "action": action
         })
 
-    rsi = calculate_rsi(prices)
-    ema_fast = calculate_ema(prices, 10)
-    ema_slow = calculate_ema(prices, 20)
-    price = prices[-1]
+    final_value = capital + position * prices[-1]
 
-    action = "ATTENTE"
-
-    # LOGIQUE MODE C
-    if rsi and ema_fast and ema_slow:
-        if rsi < 30 and ema_fast > ema_slow and sto_state["position"] is None:
-            action = "BUY"
-            sto_state["position"] = "LONG"
-            sto_state["last_price"] = price
-        elif rsi > 70 and sto_state["position"] == "LONG":
-            action = "SELL"
-            profit = price - sto_state["last_price"]
-            sto_state["capital"] += profit
-            sto_state["position"] = None
-
-    # JOURNAL
-    journal.append({
-        "time": int(time.time()),
-        "price": price,
-        "rsi": rsi,
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "action": action,
-        "capital": round(sto_state["capital"], 2)
-    })
-
-    # CACHE
-    cache_market["last"] = journal[-1]
-
-    return jsonify({
-        "mode": "PAPER",
-        "action_STO": action,
-        "prix_actuel": price,
-        "RSI": rsi,
-        "EMA_fast": ema_fast,
-        "EMA_slow": ema_slow,
-        "capital": round(sto_state["capital"], 2)
-    })
+    return {
+        "capital_final": round(final_value, 2),
+        "profit_pct": round((final_value - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100, 2),
+        "decisions": decisions
+    }
 
 # ======================
-# JOURNAL API
-# ======================
-@app.route("/journal", methods=["GET"])
-def get_journal():
-    return jsonify(journal)
-
-# ======================
-# DASHBOARD
+# ROUTES
 # ======================
 @app.route("/")
-def dashboard():
-    return render_template_string("""
-    <html>
-    <head>
-        <title>STO Dashboard</title>
-        <style>
-            body { background:#0e0e0e; color:#00ff99; font-family:Arial; }
-            h1 { color:#00ffaa; }
-            .box { margin:20px; }
-        </style>
-    </head>
-    <body>
-        <h1>STO Dashboard</h1>
-        <div class="box">Mode : {{mode}}</div>
-        <div class="box">Décision : {{decision}}</div>
-        <div class="box">Capital : {{capital}}</div>
-        <div class="box">Position : {{position}}</div>
-        <div class="box">Journal entries : {{entries}}</div>
-    </body>
-    </html>
-    """,
-    mode=sto_state["mode"],
-    decision=sto_state["mode_decision"],
-    capital=sto_state["capital"],
-    position=sto_state["position"],
-    entries=len(journal)
-    )
+def home():
+    return jsonify({
+        "statut": "STO ONLINE",
+        "mode": sto_state["mode"],
+        "uptime_sec": int(time.time() - sto_state["start_time"])
+    })
+
+@app.route("/backtest", methods=["POST"])
+def backtest():
+    data = request.json or {}
+    series_list = data.get("series")
+
+    if not series_list or not isinstance(series_list, list):
+        return jsonify({"error": "Aucune série fournie"}), 400
+
+    results = []
+    for idx, series in enumerate(series_list):
+        if len(series) < 30:
+            continue
+        result = backtest_series(series)
+        result["series_id"] = idx
+        results.append(result)
+        sto_state["journal"].append(result)
+
+    return jsonify({
+        "mode": "BACKTEST",
+        "tests": results
+    })
+
+@app.route("/journal")
+def journal():
+    return jsonify(sto_state["journal"])
 
 # ======================
 # RUN
