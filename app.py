@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import time
+import math
 from statistics import mean
 
 app = Flask(__name__)
@@ -7,40 +8,48 @@ app = Flask(__name__)
 # ======================
 # CONFIG STO
 # ======================
-ADMIN_EMAIL = "saguiorelio32@gmail.com"
-INITIAL_CAPITAL = 1000
-RISK_PER_TRADE = 0.02  # 2%
+STO_MODE = "OFFLINE"
+DECISION_MODE = "SEMI_ACTIVE"  # CONSERVATEUR | SEMI_ACTIVE | AGRESSIF
 
 # ======================
 # ÉTAT STO
 # ======================
 sto_state = {
-    "mode": "PAPER",
-    "decision_mode": "C",
     "start_time": time.time(),
-    "journal": []
+    "last_signal": "NONE",
+    "last_confirmation": "NONE"
 }
+
+# ======================
+# JOURNAL TAPPER TRADING
+# ======================
+decision_journal = []
+
+# ======================
+# BACKUP MULTI-SÉRIES
+# ======================
+series_backup = []
 
 # ======================
 # INDICATEURS
 # ======================
-def calculate_ema(prices, period):
+def ema(prices, period):
     if len(prices) < period:
         return None
     k = 2 / (period + 1)
-    ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
-    return round(ema, 2)
+    ema_val = prices[0]
+    for p in prices[1:]:
+        ema_val = p * k + ema_val * (1 - k)
+    return round(ema_val, 2)
 
-def calculate_rsi(prices, period=14):
+def rsi(prices, period=14):
     if len(prices) < period + 1:
         return None
     gains, losses = [], []
     for i in range(1, len(prices)):
-        diff = prices[i] - prices[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(-min(diff, 0))
+        delta = prices[i] - prices[i-1]
+        gains.append(max(delta, 0))
+        losses.append(abs(min(delta, 0)))
     avg_gain = mean(gains[:period])
     avg_loss = mean(losses[:period])
     if avg_loss == 0:
@@ -49,85 +58,93 @@ def calculate_rsi(prices, period=14):
     return round(100 - (100 / (1 + rs)), 2)
 
 # ======================
-# BACKTEST MOTEUR
-# ======================
-def backtest_series(prices):
-    capital = INITIAL_CAPITAL
-    position = 0
-    decisions = []
-
-    for i in range(20, len(prices)):
-        window = prices[:i]
-        price = prices[i]
-        rsi = calculate_rsi(window)
-        ema_fast = calculate_ema(window, 10)
-        ema_slow = calculate_ema(window, 20)
-
-        action = "HOLD"
-
-        if rsi and ema_fast and ema_slow:
-            if rsi < 30 and ema_fast > ema_slow:
-                risk_amount = capital * RISK_PER_TRADE
-                position = risk_amount / price
-                capital -= risk_amount
-                action = "BUY"
-            elif rsi > 70 and position > 0:
-                capital += position * price
-                position = 0
-                action = "SELL"
-
-        decisions.append({
-            "price": price,
-            "rsi": rsi,
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            "action": action
-        })
-
-    final_value = capital + position * prices[-1]
-
-    return {
-        "capital_final": round(final_value, 2),
-        "profit_pct": round((final_value - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100, 2),
-        "decisions": decisions
-    }
-
-# ======================
-# ROUTES
+# PAGE RACINE
 # ======================
 @app.route("/")
 def home():
     return jsonify({
-        "statut": "STO ONLINE",
-        "mode": sto_state["mode"],
+        "STO": "EN LIGNE",
+        "mode": STO_MODE,
+        "decision_mode": DECISION_MODE,
         "uptime_sec": int(time.time() - sto_state["start_time"])
     })
 
-@app.route("/backtest", methods=["POST"])
-def backtest():
-    data = request.json or {}
-    series_list = data.get("series")
+# ======================
+# SIMULATION + LOGIQUE
+# ======================
+@app.route("/simulate", methods=["GET"])
+def simulate():
+    raw = request.args.get("prices", "")
+    prices = [float(x) for x in raw.split(",") if x.strip()]
 
-    if not series_list or not isinstance(series_list, list):
-        return jsonify({"error": "Aucune série fournie"}), 400
+    if len(prices) < 20:
+        return jsonify({
+            "statut_marche": "ERREUR",
+            "raison": "Pas assez de données simulées"
+        }), 400
 
-    results = []
-    for idx, series in enumerate(series_list):
-        if len(series) < 30:
-            continue
-        result = backtest_series(series)
-        result["series_id"] = idx
-        results.append(result)
-        sto_state["journal"].append(result)
+    # Backup multisérie
+    series_backup.append(prices)
 
-    return jsonify({
-        "mode": "BACKTEST",
-        "tests": results
+    ema_short = ema(prices, 10)
+    ema_long = ema(prices, 20)
+    rsi_val = rsi(prices)
+
+    # Signal
+    signal = "HOLD"
+    if ema_short and ema_long and rsi_val:
+        if ema_short > ema_long and rsi_val > 55:
+            signal = "BUY"
+        elif ema_short < ema_long and rsi_val < 45:
+            signal = "SELL"
+
+    # Confirmation
+    confirmation = "NO"
+    if signal == "BUY" and rsi_val > 60:
+        confirmation = "CONFIRMED"
+    elif signal == "SELL" and rsi_val < 40:
+        confirmation = "CONFIRMED"
+
+    sto_state["last_signal"] = signal
+    sto_state["last_confirmation"] = confirmation
+
+    # Journalisation
+    decision_journal.append({
+        "timestamp": int(time.time()),
+        "signal": signal,
+        "confirmation": confirmation,
+        "ema_short": ema_short,
+        "ema_long": ema_long,
+        "rsi": rsi_val
     })
 
-@app.route("/journal")
+    return jsonify({
+        "mode": STO_MODE,
+        "decision_mode": DECISION_MODE,
+        "prix_actuel": prices[-1],
+        "EMA_10": ema_short,
+        "EMA_20": ema_long,
+        "RSI": rsi_val,
+        "signal": signal,
+        "confirmation": confirmation
+    })
+
+# ======================
+# JOURNAL
+# ======================
+@app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify(sto_state["journal"])
+    return jsonify(decision_journal)
+
+# ======================
+# BACKUP
+# ======================
+@app.route("/backup", methods=["GET"])
+def backup():
+    return jsonify({
+        "nombre_series": len(series_backup),
+        "series": series_backup[-3:]  # dernières séries
+    })
 
 # ======================
 # RUN
