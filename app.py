@@ -1,120 +1,146 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 import time
 import random
-from statistics import mean
 
 app = Flask(__name__)
 
 # ======================
 # CONFIG
 # ======================
-ADMIN_EMAIL = "saguiorelio32@gmail.com"
+START_TIME = time.time()
+MODE_DECISION = "C"  # A / B / C
+CAPITAL_SIMULE = 1000
 
 # ======================
 # ÉTAT STO
 # ======================
 sto_state = {
-    "mode_decision": "C",  # A = conservateur, B = normal, C = agressif
-    "market_status": "OFFLINE",
-    "last_action": "ATTENTE",
-    "reason": "Mode simulation",
-    "start_time": time.time(),
-    "journal": []
+    "mode": "OFFLINE",
+    "decision": "ATTENTE",
+    "raison": "STO stable – mode offline",
+    "capital": CAPITAL_SIMULE,
+    "last_update": time.time()
 }
 
-# ======================
-# UTILITAIRES SIMULATION
-# ======================
-def generate_prices(n=60, start=87000):
-    prices = [start]
-    for _ in range(n-1):
-        prices.append(round(prices[-1] * (1 + random.uniform(-0.002, 0.002)), 2))
-    return prices
-
-def calculate_ema(prices, period):
-    if len(prices) < period:
-        return None
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
-    return round(ema, 2)
-
-def calculate_rsi(prices, period=14):
-    if len(prices) <= period:
-        return None
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-    avg_gain = mean(gains[:period])
-    avg_loss = mean(losses[:period])
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
+decision_log = []
 
 # ======================
-# ROUTES
+# VISUEL 1 — DASHBOARD STO
 # ======================
 @app.route("/")
-def home():
-    return jsonify({
-        "statut": "STO STABLE – MODE OFFLINE",
-        "mode_decision": sto_state["mode_decision"],
-        "uptime_sec": int(time.time() - sto_state["start_time"])
-    })
+def dashboard():
+    uptime = int(time.time() - START_TIME)
+    return f"""
+    <html>
+    <head>
+        <title>STO Dashboard</title>
+        <style>
+            body {{ font-family: Arial; background:#0f172a; color:#e5e7eb; padding:30px; }}
+            .box {{ background:#020617; padding:20px; border-radius:12px; width:400px; }}
+            h1 {{ color:#22c55e; }}
+            .label {{ color:#94a3b8; }}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>STO — EN LIGNE</h1>
+            <p><span class="label">Mode :</span> {sto_state["mode"]}</p>
+            <p><span class="label">Décision :</span> {sto_state["decision"]}</p>
+            <p><span class="label">Raison :</span> {sto_state["raison"]}</p>
+            <p><span class="label">Capital simulé :</span> {sto_state["capital"]} $</p>
+            <p><span class="label">Uptime :</span> {uptime} sec</p>
+            <hr>
+            <p>📊 <a href="/simulate">Simulation</a></p>
+            <p>📜 <a href="/journal">Journal décisions</a></p>
+        </div>
+    </body>
+    </html>
+    """
 
+# ======================
+# VISUEL 2 — SIMULATION OFFLINE
+# ======================
 @app.route("/simulate")
 def simulate():
-    prices = generate_prices()
-    rsi = calculate_rsi(prices)
-    ema_short = calculate_ema(prices, 10)
-    ema_long = calculate_ema(prices, 20)
+    prix = random.randint(85000, 90000)
+    variation = random.choice([-1, 1]) * random.uniform(0.2, 1.5)
 
-    if rsi is None or ema_short is None or ema_long is None:
-        return jsonify({
-            "statut_marche": "ERREUR",
-            "raison": "Pas assez de données simulées"
-        }), 500
+    if variation > 0.7:
+        decision = "ACHAT"
+        raison = "Signal haussier simulé"
+    elif variation < -0.7:
+        decision = "VENTE"
+        raison = "Signal baissier simulé"
+    else:
+        decision = "ATTENTE"
+        raison = "Marché simulé neutre"
 
-    if sto_state["mode_decision"] == "A":
-        signal = "ATTENTE"
-    elif sto_state["mode_decision"] == "B":
-        signal = "ACHAT" if rsi < 35 else "ATTENTE"
-    else:  # C
-        signal = "ACHAT" if rsi < 45 and ema_short > ema_long else "ATTENTE"
+    sto_state["decision"] = decision
+    sto_state["raison"] = raison
+    sto_state["last_update"] = time.time()
 
-    decision = {
-        "prix_actuel": prices[-1],
-        "RSI": rsi,
-        "EMA10": ema_short,
-        "EMA20": ema_long,
-        "action": signal,
-        "timestamp": time.time()
-    }
-
-    sto_state["journal"].append(decision)
-    sto_state["last_action"] = signal
-    sto_state["reason"] = "Décision simulée"
-
-    return jsonify({
-        "statut_marche": "OK",
-        "source": "SIMULATION",
-        "decision": decision
+    decision_log.append({
+        "prix": prix,
+        "decision": decision,
+        "raison": raison,
+        "timestamp": int(time.time())
     })
 
+    return f"""
+    <html>
+    <head>
+        <title>STO Simulation</title>
+        <style>
+            body {{ font-family: Arial; background:#020617; color:#e5e7eb; padding:30px; }}
+            .box {{ background:#020617; padding:20px; border-radius:12px; width:450px; }}
+            h1 {{ color:#38bdf8; }}
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h1>Simulation STO</h1>
+            <p>Prix simulé BTC : {prix} $</p>
+            <p>Décision : <b>{decision}</b></p>
+            <p>Raison : {raison}</p>
+            <br>
+            <a href="/simulate">🔁 Relancer simulation</a><br>
+            <a href="/">⬅ Retour dashboard</a>
+        </div>
+    </body>
+    </html>
+    """
+
+# ======================
+# VISUEL 3 — JOURNAL
+# ======================
 @app.route("/journal")
 def journal():
-    return jsonify(sto_state["journal"][-20:])
+    rows = ""
+    for d in decision_log[-10:][::-1]:
+        rows += f"<tr><td>{d['timestamp']}</td><td>{d['prix']}</td><td>{d['decision']}</td><td>{d['raison']}</td></tr>"
 
-@app.route("/set_mode/<mode>")
-def set_mode(mode):
-    if mode in ["A", "B", "C"]:
-        sto_state["mode_decision"] = mode
-        return jsonify({"mode": mode, "status": "OK"})
-    return jsonify({"error": "mode invalide"}), 400
+    return f"""
+    <html>
+    <head>
+        <title>Journal STO</title>
+        <style>
+            body {{ font-family: Arial; background:#020617; color:#e5e7eb; padding:30px; }}
+            table {{ border-collapse: collapse; width:600px; }}
+            td, th {{ border:1px solid #334155; padding:8px; }}
+            th {{ background:#020617; }}
+        </style>
+    </head>
+    <body>
+        <h1>Journal des décisions</h1>
+        <table>
+            <tr><th>Time</th><th>Prix</th><th>Décision</th><th>Raison</th></tr>
+            {rows}
+        </table>
+        <br>
+        <a href="/">⬅ Retour dashboard</a>
+    </body>
+    </html>
+    """
 
 # ======================
 # RUN
