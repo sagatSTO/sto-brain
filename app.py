@@ -1,48 +1,35 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 import time
-import math
+import uuid
 from statistics import mean
 
 app = Flask(__name__)
 
 # ======================
-# CONFIG STO
+# CONFIG
 # ======================
-STO_MODE = "OFFLINE"
-DECISION_MODE = "SEMI_ACTIVE"  # CONSERVATEUR | SEMI_ACTIVE | AGRESSIF
+ADMIN_EMAIL = "saguiorelio32@gmail.com"
 
 # ======================
-# ÉTAT STO
+# ÉTAT GLOBAL STO
 # ======================
 sto_state = {
-    "start_time": time.time(),
-    "last_signal": "NONE",
-    "last_confirmation": "NONE"
+    "mode_decision": "C",          # A = conservateur, B = équilibré, C = semi-actif
+    "mode_execution": "SEMI_ACTIF",
+    "capital_simule": 10000,
+    "risk_per_trade": 0.01,        # 1%
+    "start_time": time.time()
 }
 
 # ======================
-# JOURNAL TAPPER TRADING
+# JOURNAL DES DÉCISIONS
 # ======================
 decision_journal = []
 
 # ======================
-# BACKUP MULTI-SÉRIES
+# INDICATEURS LOCAUX
 # ======================
-series_backup = []
-
-# ======================
-# INDICATEURS
-# ======================
-def ema(prices, period):
-    if len(prices) < period:
-        return None
-    k = 2 / (period + 1)
-    ema_val = prices[0]
-    for p in prices[1:]:
-        ema_val = p * k + ema_val * (1 - k)
-    return round(ema_val, 2)
-
-def rsi(prices, period=14):
+def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
         return None
     gains, losses = [], []
@@ -50,101 +37,93 @@ def rsi(prices, period=14):
         delta = prices[i] - prices[i-1]
         gains.append(max(delta, 0))
         losses.append(abs(min(delta, 0)))
-    avg_gain = mean(gains[:period])
-    avg_loss = mean(losses[:period])
+    avg_gain = mean(gains[-period:])
+    avg_loss = mean(losses[-period:])
     if avg_loss == 0:
         return 100
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
+def calculate_ema(prices, period=10):
+    if len(prices) < period:
+        return None
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices[1:]:
+        ema = price * k + ema * (1 - k)
+    return round(ema, 2)
+
 # ======================
-# PAGE RACINE
+# LOGIQUE DE DÉCISION
+# ======================
+def decision_engine(prices):
+    rsi = calculate_rsi(prices)
+    ema_short = calculate_ema(prices, 10)
+    ema_long = calculate_ema(prices, 20)
+
+    if rsi is None or ema_short is None or ema_long is None:
+        return "ATTENTE", "Pas assez de données"
+
+    signal = "NEUTRE"
+    if rsi > 60 and ema_short > ema_long:
+        signal = "ACHAT"
+    elif rsi < 40 and ema_short < ema_long:
+        signal = "VENTE"
+
+    # Confirmation (anti-bruit)
+    if sto_state["mode_decision"] == "A" and signal != "ACHAT":
+        signal = "ATTENTE"
+    elif sto_state["mode_decision"] == "B" and signal == "VENTE":
+        signal = "ATTENTE"
+
+    return signal, f"RSI={rsi}, EMA10={ema_short}, EMA20={ema_long}"
+
+# ======================
+# ROUTES
 # ======================
 @app.route("/")
 def home():
     return jsonify({
-        "STO": "EN LIGNE",
-        "mode": STO_MODE,
-        "decision_mode": DECISION_MODE,
+        "statut": "STO OPÉRATIONNEL",
+        "mode_decision": sto_state["mode_decision"],
+        "mode_execution": sto_state["mode_execution"],
         "uptime_sec": int(time.time() - sto_state["start_time"])
     })
 
-# ======================
-# SIMULATION + LOGIQUE
-# ======================
 @app.route("/simulate", methods=["GET"])
 def simulate():
     raw = request.args.get("prices", "")
     prices = [float(x) for x in raw.split(",") if x.strip()]
 
-    if len(prices) < 20:
-        return jsonify({
-            "statut_marche": "ERREUR",
-            "raison": "Pas assez de données simulées"
-        }), 400
+    signal, reason = decision_engine(prices)
 
-    # Backup multisérie
-    series_backup.append(prices)
-
-    ema_short = ema(prices, 10)
-    ema_long = ema(prices, 20)
-    rsi_val = rsi(prices)
-
-    # Signal
-    signal = "HOLD"
-    if ema_short and ema_long and rsi_val:
-        if ema_short > ema_long and rsi_val > 55:
-            signal = "BUY"
-        elif ema_short < ema_long and rsi_val < 45:
-            signal = "SELL"
-
-    # Confirmation
-    confirmation = "NO"
-    if signal == "BUY" and rsi_val > 60:
-        confirmation = "CONFIRMED"
-    elif signal == "SELL" and rsi_val < 40:
-        confirmation = "CONFIRMED"
-
-    sto_state["last_signal"] = signal
-    sto_state["last_confirmation"] = confirmation
-
-    # Journalisation
-    decision_journal.append({
+    decision = {
+        "id": str(uuid.uuid4()),
         "timestamp": int(time.time()),
         "signal": signal,
-        "confirmation": confirmation,
-        "ema_short": ema_short,
-        "ema_long": ema_long,
-        "rsi": rsi_val
-    })
+        "reason": reason,
+        "mode": sto_state["mode_decision"]
+    }
+
+    decision_journal.append(decision)
 
     return jsonify({
-        "mode": STO_MODE,
-        "decision_mode": DECISION_MODE,
-        "prix_actuel": prices[-1],
-        "EMA_10": ema_short,
-        "EMA_20": ema_long,
-        "RSI": rsi_val,
+        "statut": "OK",
         "signal": signal,
-        "confirmation": confirmation
+        "raison": reason,
+        "journal_size": len(decision_journal)
     })
 
-# ======================
-# JOURNAL
-# ======================
 @app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify(decision_journal)
+    return jsonify(decision_journal[-50:])  # 50 dernières décisions
 
-# ======================
-# BACKUP
-# ======================
-@app.route("/backup", methods=["GET"])
-def backup():
-    return jsonify({
-        "nombre_series": len(series_backup),
-        "series": series_backup[-3:]  # dernières séries
-    })
+@app.route("/config/mode/<mode>", methods=["POST"])
+def set_mode(mode):
+    if mode not in ["A", "B", "C"]:
+        return jsonify({"erreur": "mode invalide"}), 400
+    sto_state["mode_decision"] = mode
+    return jsonify({"mode_decision": mode})
 
 # ======================
 # RUN
