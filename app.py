@@ -1,135 +1,144 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 import time
 import uuid
 from statistics import mean
 
 app = Flask(__name__)
 
-# =========================
-# CONFIGURATION GLOBALE
-# =========================
-MODE_DECISION = "C"  # C = Hybride Pro
-SEUIL_MIN_DONNEES = 20  # seuil journal minimum
-CAPITAL_SIMULE = 1000
+# ======================
+# CONFIG GLOBALE STO
+# ======================
+STO_MODE = "C"  # A / B / C
+MIN_DATA_POINTS = 20
+DAILY_SIGNAL_THRESHOLD = 1  # nb min de signaux valides par jour
 
-# =========================
-# ÉTAT GLOBAL STO
-# =========================
+# ======================
+# ÉTAT GLOBAL
+# ======================
 sto_state = {
-    "mode": MODE_DECISION,
-    "capital": CAPITAL_SIMULE,
-    "positions": [],
-    "journal": [],
-    "price_buffer": [],
-    "last_signal": "ATTENTE",
+    "mode": STO_MODE,
+    "daily_signals": 0,
+    "last_reset": int(time.time()),
+    "journal": []
 }
 
-# =========================
-# OUTILS INDICATEURS
-# =========================
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return None
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        gains.append(max(diff, 0))
-        losses.append(abs(min(diff, 0)))
-    avg_gain = mean(gains[-period:])
-    avg_loss = mean(losses[-period:])
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
-
+# ======================
+# INDICATEURS
+# ======================
 def calculate_ema(prices, period):
     if len(prices) < period:
         return None
     k = 2 / (period + 1)
     ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
+    for p in prices[1:]:
+        ema = (p * k) + (ema * (1 - k))
     return round(ema, 2)
 
-# =========================
-# SIMULATION / INJECTION
-# =========================
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        delta = prices[i] - prices[i - 1]
+        gains.append(max(delta, 0))
+        losses.append(max(-delta, 0))
+    avg_gain = mean(gains[:period])
+    avg_loss = mean(losses[:period])
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
+
+# ======================
+# PAGE PRINCIPALE
+# ======================
+@app.route("/")
+def home():
+    return jsonify({
+        "statut": "STO STABLE – MODE OFFLINE",
+        "mode": sto_state["mode"],
+        "journal_entries": len(sto_state["journal"])
+    })
+
+# ======================
+# SIMULATION / DÉCISION
+# ======================
 @app.route("/simulate", methods=["GET"])
 def simulate():
     raw = request.args.get("prices", "")
     try:
-        prices = [float(p) for p in raw.split(",") if p.strip()]
-        sto_state["price_buffer"] = prices
+        prices = [float(x) for x in raw.split(",") if x.strip()]
+        uid = str(uuid.uuid4())
+        timestamp = int(time.time())
 
-        if len(prices) < SEUIL_MIN_DONNEES:
-            message = f"Pas assez de données ({len(prices)}/{SEUIL_MIN_DONNEES}) – seuil journal non atteint"
-            sto_state["last_signal"] = "ATTENTE"
-            return jsonify({
+        # Reset journalier (24h)
+        if timestamp - sto_state["last_reset"] > 86400:
+            sto_state["daily_signals"] = 0
+            sto_state["last_reset"] = timestamp
+
+        # Vérification données
+        if len(prices) < MIN_DATA_POINTS:
+            reason = f"Pas assez de données ({len(prices)}/{MIN_DATA_POINTS})"
+            decision = {
+                "id": uid,
+                "mode": STO_MODE,
                 "signal": "ATTENTE",
-                "mode": MODE_DECISION,
-                "raison": message,
-                "statut": "STO STABLE – MODE OFFLINE"
-            })
+                "reason": reason,
+                "timestamp": timestamp
+            }
+            sto_state["journal"].append(decision)
+            return jsonify(decision)
 
-        # =========================
-        # ANALYSE
-        # =========================
+        # Indicateurs
         rsi = calculate_rsi(prices)
-        ema_fast = calculate_ema(prices, 9)
-        ema_slow = calculate_ema(prices, 21)
+        ema_fast = calculate_ema(prices, 10)
+        ema_slow = calculate_ema(prices, 20)
 
+        # Logique décisionnelle
         signal = "ATTENTE"
-        raison = "Conditions non réunies"
+        reason = "Conditions non remplies"
 
         if rsi and ema_fast and ema_slow:
-            if rsi < 30 and ema_fast > ema_slow:
-                signal = "ACHAT"
-                raison = "RSI bas + EMA haussière confirmée"
-            elif rsi > 70:
-                signal = "VENTE"
-                raison = "RSI élevé – prise de profit"
+            if rsi > 55 and ema_fast > ema_slow:
+                if sto_state["daily_signals"] < DAILY_SIGNAL_THRESHOLD:
+                    signal = "ACHAT"
+                    reason = "RSI + EMA validés (seuil journalier OK)"
+                    sto_state["daily_signals"] += 1
+                else:
+                    reason = "Seuil journalier atteint"
+            else:
+                reason = "RSI / EMA non alignés"
 
         decision = {
-            "id": str(uuid.uuid4()),
-            "timestamp": int(time.time()),
-            "mode": MODE_DECISION,
+            "id": uid,
+            "mode": STO_MODE,
             "signal": signal,
-            "reason": raison,
             "rsi": rsi,
             "ema_fast": ema_fast,
-            "ema_slow": ema_slow
+            "ema_slow": ema_slow,
+            "daily_signals": sto_state["daily_signals"],
+            "reason": reason,
+            "timestamp": timestamp
         }
 
         sto_state["journal"].append(decision)
-        sto_state["last_signal"] = signal
-
         return jsonify(decision)
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({
+            "signal": "ERREUR",
+            "reason": str(e)
+        }), 500
 
-# =========================
-# JOURNAL DES DÉCISIONS
-# =========================
+# ======================
+# JOURNAL
+# ======================
 @app.route("/journal", methods=["GET"])
 def journal():
-    return jsonify(sto_state["journal"][-50:])
+    return jsonify(sto_state["journal"][-20:])
 
-# =========================
-# ÉTAT STO
-# =========================
-@app.route("/", methods=["GET"])
-def status():
-    return jsonify({
-        "mode": MODE_DECISION,
-        "capital": sto_state["capital"],
-        "last_signal": sto_state["last_signal"],
-        "points_donnees": len(sto_state["price_buffer"]),
-        "seuil_requis": SEUIL_MIN_DONNEES
-    })
-
-# =========================
+# ======================
 # RUN
-# =========================
+# ======================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
