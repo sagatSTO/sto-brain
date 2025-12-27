@@ -9,57 +9,32 @@ app = Flask(__name__)
 # CONFIG
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
-MODE_DECISION = "C"  # A / B / C
-CAPITAL_SIMULE = 1000
-SEUIL_JOURNALIER = 3  # max décisions / jour
+MODE_DECISION = "C"          # A / B / C
+CAPITAL_INITIAL = 1000
+POSITION_RATIO = 0.10        # 10 % du capital
+SEUIL_JOURNALIER = 3         # max décisions / jour
+SIGNAL_CONFIRMATION_REQUIRED = 3
 
 # ======================
-# STOCKAGE (TABLES)
+# TABLES (STOCKAGE)
 # ======================
-
-# TABLE 3 : Journal décisions
-DECISION_JOURNAL = []
-
-# TABLE 12 : Historique signaux
-SIGNAL_TABLE = []
+DECISION_JOURNAL = []   # TABLE 3
+SIGNAL_TABLE = []       # TABLE 12
+PAPER_TRADES = []       # TABLE 5
 
 # ======================
-# ÉTAT GLOBAL
+# ÉTAT GLOBAL STO
 # ======================
 sto_state = {
     "mode": MODE_DECISION,
-    "capital": CAPITAL_SIMULE,
+    "capital": CAPITAL_INITIAL,
+    "position": None,        # None ou dict
     "daily_count": 0,
     "last_reset": time.strftime("%Y-%m-%d"),
+    "signal_history": [],
     "start_time": time.time()
 }
-# ======================
-# CONFIRMATION SIGNAL (ÉTAPE 4)
-# ======================
 
-SIGNAL_CONFIRMATION_REQUIRED = 3  # nombre de confirmations nécessaires
-
-if "signal_history" not in sto_state:
-    sto_state["signal_history"] = []
-
-def confirm_signal(signal):
-    """
-    Ajoute le signal à l'historique et vérifie s'il est confirmé
-    """
-    history = sto_state["signal_history"]
-
-    history.append(signal)
-
-    # garder seulement les 10 derniers signaux
-    if len(history) > 10:
-        history.pop(0)
-
-    # compter les confirmations
-    same_signal_count = history.count(signal)
-
-    if same_signal_count >= SIGNAL_CONFIRMATION_REQUIRED:
-        return True
-    return False
 # ======================
 # UTILS
 # ======================
@@ -84,7 +59,7 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-def calculate_ema(prices, period=10):
+def calculate_ema(prices, period):
     if len(prices) < period:
         return None
     k = 2 / (period + 1)
@@ -93,16 +68,24 @@ def calculate_ema(prices, period=10):
         ema = (p * k) + (ema * (1 - k))
     return round(ema, 2)
 
+def confirm_signal(signal):
+    hist = sto_state["signal_history"]
+    hist.append(signal)
+    if len(hist) > 10:
+        hist.pop(0)
+    return hist.count(signal) >= SIGNAL_CONFIRMATION_REQUIRED
+
 # ======================
 # ROUTES
 # ======================
-
 @app.route("/")
 def home():
     return jsonify({
-        "statut": "STO STABLE – MODE OFFLINE",
+        "statut": "STO STABLE – MODE PAPER OFFLINE",
         "mode": sto_state["mode"],
-        "temps_en_ligne": int(time.time() - sto_state["start_time"])
+        "capital": round(sto_state["capital"], 2),
+        "position": sto_state["position"],
+        "uptime_sec": int(time.time() - sto_state["start_time"])
     })
 
 @app.route("/simulate", methods=["GET"])
@@ -112,8 +95,7 @@ def simulate():
     if sto_state["daily_count"] >= SEUIL_JOURNALIER:
         return jsonify({
             "signal": "BLOQUÉ",
-            "raison": "Seuil journalier atteint",
-            "mode": sto_state["mode"]
+            "raison": "Seuil journalier atteint"
         })
 
     raw = request.args.get("prices", "")
@@ -122,9 +104,10 @@ def simulate():
     if len(prices) < 20:
         return jsonify({
             "statut_marche": "ERREUR",
-            "raison": "Pas assez de données simulées"
+            "raison": "Pas assez de données"
         })
 
+    last_price = prices[-1]
     rsi = calculate_rsi(prices)
     ema_fast = calculate_ema(prices, 10)
     ema_slow = calculate_ema(prices, 20)
@@ -142,10 +125,51 @@ def simulate():
 
     sto_state["daily_count"] += 1
 
+    confirmed = confirm_signal(signal)
+
+    trade_executed = None
+
+    # ======================
+    # PAPER EXECUTION (ÉTAPE 5)
+    # ======================
+    if confirmed:
+        # ACHAT
+        if signal == "ACHAT" and sto_state["position"] is None:
+            invest = sto_state["capital"] * POSITION_RATIO
+            qty = invest / last_price
+            sto_state["capital"] -= invest
+            sto_state["position"] = {
+                "entry_price": last_price,
+                "qty": qty,
+                "invest": invest,
+                "timestamp": int(time.time())
+            }
+            trade_executed = "ACHAT_PAPER"
+
+        # VENTE
+        elif signal == "VENTE" and sto_state["position"] is not None:
+            pos = sto_state["position"]
+            value = pos["qty"] * last_price
+            pnl = value - pos["invest"]
+            sto_state["capital"] += value
+            sto_state["position"] = None
+            trade_executed = "VENTE_PAPER"
+
+            PAPER_TRADES.append({
+                "id": str(uuid.uuid4()),
+                "type": "VENTE",
+                "entry_price": pos["entry_price"],
+                "exit_price": last_price,
+                "pnl": round(pnl, 2),
+                "timestamp": int(time.time())
+            })
+
     record = {
         "id": str(uuid.uuid4()),
         "mode": sto_state["mode"],
         "signal": signal,
+        "confirmed": confirmed,
+        "trade": trade_executed,
         "reason": raison,
         "timestamp": int(time.time())
     }
@@ -161,20 +185,28 @@ def simulate():
 
     return jsonify({
         "signal": signal,
-        "raison": raison,
+        "confirmé": confirmed,
+        "trade": trade_executed,
+        "prix": last_price,
         "rsi": rsi,
         "ema_fast": ema_fast,
         "ema_slow": ema_slow,
+        "capital": round(sto_state["capital"], 2),
+        "position": sto_state["position"],
         "decisions_jour": sto_state["daily_count"]
     })
 
-@app.route("/journal", methods=["GET"])
+@app.route("/journal")
 def journal():
     return jsonify(DECISION_JOURNAL[-20:])
 
-@app.route("/signals", methods=["GET"])
+@app.route("/signals")
 def signals():
     return jsonify(SIGNAL_TABLE[-20:])
+
+@app.route("/paper_trades")
+def paper_trades():
+    return jsonify(PAPER_TRADES[-20:])
 
 # ======================
 # RUN
