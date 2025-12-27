@@ -6,33 +6,34 @@ from statistics import mean
 app = Flask(__name__)
 
 # ======================
-# CONFIG
+# CONFIG GLOBALE
 # ======================
 ADMIN_EMAIL = "saguiorelio32@gmail.com"
-MODE_DECISION = "C"          # A / B / C
-CAPITAL_INITIAL = 1000
-POSITION_RATIO = 0.10        # 10 % du capital
-SEUIL_JOURNALIER = 3         # max décisions / jour
-SIGNAL_CONFIRMATION_REQUIRED = 3
+
+MODE_DECISION = "C"            # A / B / C
+MODE_EXECUTION = "PAPER"       # OFFLINE / PAPER
+CAPITAL_INITIAL = 1000.0
+RISQUE_PAR_TRADE = 0.02        # 2%
+SEUIL_JOURNALIER = 3           # max décisions / jour
 
 # ======================
 # TABLES (STOCKAGE)
 # ======================
 DECISION_JOURNAL = []   # TABLE 3
 SIGNAL_TABLE = []       # TABLE 12
-PAPER_TRADES = []       # TABLE 5
+PAPER_TRADES = []       # TABLE 20 (nouvelle)
 
 # ======================
-# ÉTAT GLOBAL STO
+# ÉTAT GLOBAL
 # ======================
 sto_state = {
     "mode": MODE_DECISION,
+    "execution": MODE_EXECUTION,
     "capital": CAPITAL_INITIAL,
-    "position": None,        # None ou dict
     "daily_count": 0,
     "last_reset": time.strftime("%Y-%m-%d"),
-    "signal_history": [],
-    "start_time": time.time()
+    "start_time": time.time(),
+    "signal_history": []
 }
 
 # ======================
@@ -59,7 +60,7 @@ def calculate_rsi(prices, period=14):
     rs = avg_gain / avg_loss
     return round(100 - (100 / (1 + rs)), 2)
 
-def calculate_ema(prices, period):
+def calculate_ema(prices, period=10):
     if len(prices) < period:
         return None
     k = 2 / (period + 1)
@@ -68,23 +69,23 @@ def calculate_ema(prices, period):
         ema = (p * k) + (ema * (1 - k))
     return round(ema, 2)
 
-def confirm_signal(signal):
-    hist = sto_state["signal_history"]
-    hist.append(signal)
-    if len(hist) > 10:
-        hist.pop(0)
-    return hist.count(signal) >= SIGNAL_CONFIRMATION_REQUIRED
+def position_size(capital, prix_entree):
+    risque_montant = capital * RISQUE_PAR_TRADE
+    if prix_entree <= 0:
+        return 0
+    return round(risque_montant / prix_entree, 6)
 
 # ======================
 # ROUTES
 # ======================
+
 @app.route("/")
 def home():
     return jsonify({
-        "statut": "STO STABLE – MODE PAPER OFFLINE",
-        "mode": sto_state["mode"],
+        "statut": "STO STABLE",
+        "mode_decision": sto_state["mode"],
+        "mode_execution": sto_state["execution"],
         "capital": round(sto_state["capital"], 2),
-        "position": sto_state["position"],
         "uptime_sec": int(time.time() - sto_state["start_time"])
     })
 
@@ -104,16 +105,16 @@ def simulate():
     if len(prices) < 20:
         return jsonify({
             "statut_marche": "ERREUR",
-            "raison": "Pas assez de données"
+            "raison": "Pas assez de données simulées"
         })
 
-    last_price = prices[-1]
     rsi = calculate_rsi(prices)
     ema_fast = calculate_ema(prices, 10)
     ema_slow = calculate_ema(prices, 20)
 
     signal = "ATTENTE"
     raison = "Marché neutre"
+    prix_actuel = prices[-1]
 
     if rsi and ema_fast and ema_slow:
         if rsi > 60 and ema_fast > ema_slow:
@@ -125,86 +126,59 @@ def simulate():
 
     sto_state["daily_count"] += 1
 
-    confirmed = confirm_signal(signal)
-
-    trade_executed = None
-
-    # ======================
-    # PAPER EXECUTION (ÉTAPE 5)
-    # ======================
-    if confirmed:
-        # ACHAT
-        if signal == "ACHAT" and sto_state["position"] is None:
-            invest = sto_state["capital"] * POSITION_RATIO
-            qty = invest / last_price
-            sto_state["capital"] -= invest
-            sto_state["position"] = {
-                "entry_price": last_price,
-                "qty": qty,
-                "invest": invest,
-                "timestamp": int(time.time())
-            }
-            trade_executed = "ACHAT_PAPER"
-
-        # VENTE
-        elif signal == "VENTE" and sto_state["position"] is not None:
-            pos = sto_state["position"]
-            value = pos["qty"] * last_price
-            pnl = value - pos["invest"]
-            sto_state["capital"] += value
-            sto_state["position"] = None
-            trade_executed = "VENTE_PAPER"
-
-            PAPER_TRADES.append({
-                "id": str(uuid.uuid4()),
-                "type": "VENTE",
-                "entry_price": pos["entry_price"],
-                "exit_price": last_price,
-                "pnl": round(pnl, 2),
-                "timestamp": int(time.time())
-            })
-
-    record = {
+    decision = {
         "id": str(uuid.uuid4()),
-        "mode": sto_state["mode"],
         "signal": signal,
-        "confirmed": confirmed,
-        "trade": trade_executed,
-        "reason": raison,
+        "raison": raison,
         "timestamp": int(time.time())
     }
+    DECISION_JOURNAL.append(decision)
 
-    DECISION_JOURNAL.append(record)
     SIGNAL_TABLE.append({
         "rsi": rsi,
         "ema_fast": ema_fast,
         "ema_slow": ema_slow,
         "signal": signal,
-        "timestamp": record["timestamp"]
+        "timestamp": decision["timestamp"]
     })
+
+    # ======================
+    # MODE PAPER (PRIORITÉ 2)
+    # ======================
+    trade = None
+    if sto_state["execution"] == "PAPER" and signal in ["ACHAT", "VENTE"]:
+        qty = position_size(sto_state["capital"], prix_actuel)
+        if qty > 0:
+            trade = {
+                "id": decision["id"],
+                "type": signal,
+                "prix": prix_actuel,
+                "quantite": qty,
+                "valeur": round(qty * prix_actuel, 2),
+                "timestamp": decision["timestamp"]
+            }
+            PAPER_TRADES.append(trade)
 
     return jsonify({
         "signal": signal,
-        "confirmé": confirmed,
-        "trade": trade_executed,
-        "prix": last_price,
+        "raison": raison,
         "rsi": rsi,
         "ema_fast": ema_fast,
         "ema_slow": ema_slow,
+        "trade_paper": trade,
         "capital": round(sto_state["capital"], 2),
-        "position": sto_state["position"],
         "decisions_jour": sto_state["daily_count"]
     })
 
-@app.route("/journal")
+@app.route("/journal", methods=["GET"])
 def journal():
     return jsonify(DECISION_JOURNAL[-20:])
 
-@app.route("/signals")
+@app.route("/signals", methods=["GET"])
 def signals():
     return jsonify(SIGNAL_TABLE[-20:])
 
-@app.route("/paper_trades")
+@app.route("/paper_trades", methods=["GET"])
 def paper_trades():
     return jsonify(PAPER_TRADES[-20:])
 
