@@ -9,16 +9,18 @@ app = Flask(__name__)
 # ======================
 MODE_DECISION = "C"
 MODE_EXECUTION = "PAPER"
+
 CAPITAL_INITIAL = 1000.0
-RISQUE_PAR_TRADE = 0.02
-SEUIL_JOURNALIER = 3
+RISQUE_PAR_TRADE = 0.02          # 2%
+TP_POURCENT = 0.03               # +3%
+SL_POURCENT = 0.015              # -1.5%
+SEUIL_JOURNALIER = 5
 CONFIRMATION_REQUIRED = 2
 
 # ======================
 # TABLES
 # ======================
 DECISION_JOURNAL = []
-SIGNAL_TABLE = []
 PAPER_TRADES = []
 
 # ======================
@@ -26,11 +28,11 @@ PAPER_TRADES = []
 # ======================
 sto_state = {
     "capital": CAPITAL_INITIAL,
+    "open_position": None,
     "daily_count": 0,
     "last_reset": time.strftime("%Y-%m-%d"),
-    "start_time": time.time(),
     "signal_history": [],
-    "open_position": None
+    "start_time": time.time()
 }
 
 # ======================
@@ -47,9 +49,9 @@ def rsi(prices, p=14):
         return None
     gains, losses = [], []
     for i in range(1, len(prices)):
-        diff = prices[i] - prices[i-1]
-        gains.append(max(diff,0))
-        losses.append(abs(min(diff,0)))
+        d = prices[i] - prices[i-1]
+        gains.append(max(d,0))
+        losses.append(abs(min(d,0)))
     ag, al = mean(gains[:p]), mean(losses[:p])
     if al == 0:
         return 100
@@ -80,10 +82,10 @@ def confirm(signal):
 @app.route("/")
 def home():
     return jsonify({
-        "statut": "STO OPÉRATIONNEL (PAPER)",
+        "statut": "STO OPÉRATIONNEL",
+        "mode_execution": MODE_EXECUTION,
         "capital": round(sto_state["capital"],2),
-        "position": sto_state["open_position"],
-        "uptime": int(time.time() - sto_state["start_time"])
+        "position": sto_state["open_position"]
     })
 
 @app.route("/simulate")
@@ -93,11 +95,11 @@ def simulate():
     prices = [float(x) for x in raw.split(",") if x.strip()]
 
     if len(prices) < 20:
-        return jsonify({"statut":"ERREUR","raison":"Pas assez de données"})
+        return jsonify({"erreur":"Pas assez de données"})
 
+    price = prices[-1]
     r = rsi(prices)
     ef, es = ema(prices,10), ema(prices,20)
-    price = prices[-1]
 
     signal = "ATTENTE"
     if r and ef and es:
@@ -107,26 +109,45 @@ def simulate():
             signal = "VENTE"
 
     confirmed = confirm(signal)
-    trade_result = None
+    trade_closed = None
 
-    # ======== GESTION POSITION ========
-    if confirmed:
-        pos = sto_state["open_position"]
+    pos = sto_state["open_position"]
 
-        if pos is None and signal == "ACHAT":
-            qty = position_size(sto_state["capital"], price)
-            sto_state["open_position"] = {
-                "type":"LONG","entry":price,"qty":qty
-            }
+    # ===== OUVERTURE POSITION =====
+    if confirmed and pos is None and signal == "ACHAT":
+        qty = position_size(sto_state["capital"], price)
+        sto_state["open_position"] = {
+            "type": "LONG",
+            "entry": price,
+            "qty": qty,
+            "tp": round(price * (1 + TP_POURCENT),2),
+            "sl": round(price * (1 - SL_POURCENT),2),
+            "time": int(time.time())
+        }
 
-        elif pos and signal == "VENTE":
+    # ===== GESTION TP / SL =====
+    elif pos:
+        if price >= pos["tp"] or price <= pos["sl"]:
             pnl = (price - pos["entry"]) * pos["qty"]
             sto_state["capital"] += pnl
-            trade_result = round(pnl,2)
+            trade_closed = round(pnl,2)
+
+            PAPER_TRADES.append({
+                "id": str(uuid.uuid4()),
+                "entry": pos["entry"],
+                "exit": price,
+                "qty": pos["qty"],
+                "pnl": round(pnl,2),
+                "timestamp": int(time.time())
+            })
+
             sto_state["open_position"] = None
 
     DECISION_JOURNAL.append({
-        "signal":signal,"confirmé":confirmed,"prix":price,"time":int(time.time())
+        "signal": signal,
+        "confirmé": confirmed,
+        "prix": price,
+        "time": int(time.time())
     })
 
     return jsonify({
@@ -136,9 +157,14 @@ def simulate():
         "ema_fast": ef,
         "ema_slow": es,
         "position": sto_state["open_position"],
-        "pnl_trade": trade_result,
-        "capital": round(sto_state["capital"],2)
+        "pnl_trade": trade_closed,
+        "capital": round(sto_state["capital"],2),
+        "mode_execution": MODE_EXECUTION
     })
+
+@app.route("/paper_trades")
+def paper_trades():
+    return jsonify(PAPER_TRADES[-20:])
 
 @app.route("/journal")
 def journal():
