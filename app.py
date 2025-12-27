@@ -9,13 +9,13 @@ app = Flask(__name__)
 # ======================
 MODE_DECISION = "C"
 MODE_EXECUTION = "PAPER"
-
 CAPITAL_INITIAL = 1000.0
-RISQUE_PAR_TRADE = 0.02          # 2%
-TP_POURCENT = 0.03               # +3%
-SL_POURCENT = 0.015              # -1.5%
-SEUIL_JOURNALIER = 5
+RISQUE_PAR_TRADE = 0.02
+SEUIL_JOURNALIER = 3
 CONFIRMATION_REQUIRED = 2
+
+TP_RATIO = 0.04   # +4%
+SL_RATIO = 0.02   # -2%
 
 # ======================
 # TABLES
@@ -28,11 +28,11 @@ PAPER_TRADES = []
 # ======================
 sto_state = {
     "capital": CAPITAL_INITIAL,
-    "open_position": None,
     "daily_count": 0,
     "last_reset": time.strftime("%Y-%m-%d"),
+    "start_time": time.time(),
     "signal_history": [],
-    "start_time": time.time()
+    "open_position": None
 }
 
 # ======================
@@ -49,9 +49,9 @@ def rsi(prices, p=14):
         return None
     gains, losses = [], []
     for i in range(1, len(prices)):
-        d = prices[i] - prices[i-1]
-        gains.append(max(d,0))
-        losses.append(abs(min(d,0)))
+        diff = prices[i] - prices[i-1]
+        gains.append(max(diff,0))
+        losses.append(abs(min(diff,0)))
     ag, al = mean(gains[:p]), mean(losses[:p])
     if al == 0:
         return 100
@@ -85,7 +85,8 @@ def home():
         "statut": "STO OPÉRATIONNEL",
         "mode_execution": MODE_EXECUTION,
         "capital": round(sto_state["capital"],2),
-        "position": sto_state["open_position"]
+        "position": sto_state["open_position"],
+        "uptime": int(time.time() - sto_state["start_time"])
     })
 
 @app.route("/simulate")
@@ -95,11 +96,11 @@ def simulate():
     prices = [float(x) for x in raw.split(",") if x.strip()]
 
     if len(prices) < 20:
-        return jsonify({"erreur":"Pas assez de données"})
+        return jsonify({"statut":"ERREUR","raison":"Pas assez de données"})
 
-    price = prices[-1]
     r = rsi(prices)
     ef, es = ema(prices,10), ema(prices,20)
+    price = prices[-1]
 
     signal = "ATTENTE"
     if r and ef and es:
@@ -109,7 +110,8 @@ def simulate():
             signal = "VENTE"
 
     confirmed = confirm(signal)
-    trade_closed = None
+    pnl_trade = None
+    action = "AUCUNE"
 
     pos = sto_state["open_position"]
 
@@ -120,33 +122,33 @@ def simulate():
             "type": "LONG",
             "entry": price,
             "qty": qty,
-            "tp": round(price * (1 + TP_POURCENT),2),
-            "sl": round(price * (1 - SL_POURCENT),2),
-            "time": int(time.time())
+            "tp": round(price * (1 + TP_RATIO),2),
+            "sl": round(price * (1 - SL_RATIO),2)
         }
+        action = "OUVERTURE LONG"
 
     # ===== GESTION TP / SL =====
     elif pos:
-        if price >= pos["tp"] or price <= pos["sl"]:
-            pnl = (price - pos["entry"]) * pos["qty"]
+        if price >= pos["tp"]:
+            pnl = (pos["tp"] - pos["entry"]) * pos["qty"]
             sto_state["capital"] += pnl
-            trade_closed = round(pnl,2)
-
-            PAPER_TRADES.append({
-                "id": str(uuid.uuid4()),
-                "entry": pos["entry"],
-                "exit": price,
-                "qty": pos["qty"],
-                "pnl": round(pnl,2),
-                "timestamp": int(time.time())
-            })
-
+            pnl_trade = round(pnl,2)
             sto_state["open_position"] = None
+            action = "TAKE PROFIT"
+
+        elif price <= pos["sl"]:
+            pnl = (pos["sl"] - pos["entry"]) * pos["qty"]
+            sto_state["capital"] += pnl
+            pnl_trade = round(pnl,2)
+            sto_state["open_position"] = None
+            action = "STOP LOSS"
 
     DECISION_JOURNAL.append({
         "signal": signal,
         "confirmé": confirmed,
         "prix": price,
+        "action": action,
+        "pnl": pnl_trade,
         "time": int(time.time())
     })
 
@@ -156,15 +158,11 @@ def simulate():
         "rsi": r,
         "ema_fast": ef,
         "ema_slow": es,
+        "action": action,
         "position": sto_state["open_position"],
-        "pnl_trade": trade_closed,
-        "capital": round(sto_state["capital"],2),
-        "mode_execution": MODE_EXECUTION
+        "pnl_trade": pnl_trade,
+        "capital": round(sto_state["capital"],2)
     })
-
-@app.route("/paper_trades")
-def paper_trades():
-    return jsonify(PAPER_TRADES[-20:])
 
 @app.route("/journal")
 def journal():
