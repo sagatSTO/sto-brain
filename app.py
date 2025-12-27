@@ -33,7 +33,33 @@ sto_state = {
     "last_reset": time.strftime("%Y-%m-%d"),
     "start_time": time.time()
 }
+# ======================
+# CONFIRMATION SIGNAL (ÉTAPE 4)
+# ======================
 
+SIGNAL_CONFIRMATION_REQUIRED = 3  # nombre de confirmations nécessaires
+
+if "signal_history" not in sto_state:
+    sto_state["signal_history"] = []
+
+def confirm_signal(signal):
+    """
+    Ajoute le signal à l'historique et vérifie s'il est confirmé
+    """
+    history = sto_state["signal_history"]
+
+    history.append(signal)
+
+    # garder seulement les 10 derniers signaux
+    if len(history) > 10:
+        history.pop(0)
+
+    # compter les confirmations
+    same_signal_count = history.count(signal)
+
+    if same_signal_count >= SIGNAL_CONFIRMATION_REQUIRED:
+        return True
+    return False
 # ======================
 # UTILS
 # ======================
